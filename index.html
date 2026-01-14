@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>QB HOUSE 店舗予測AI - エンタープライズ究極安定版</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&family=Red+Hat+Display:wght@500;700;900&display=swap" rel="stylesheet">
+    <style>
+      :root {
+        --qb-blue: #005EB8;
+        --qb-dark: #1A1A1A;
+        --qb-gray: #F8FAFC;
+      }
+      body {
+        /* English/Numbers use Red Hat Display first, Japanese falls back to Noto Sans JP */
+        font-family: 'Red Hat Display', 'Noto Sans JP', sans-serif;
+        background-color: var(--qb-gray);
+        color: var(--qb-dark);
+        -webkit-font-smoothing: antialiased;
+      }
+      /* Ensure headers and specific elements prioritize Red Hat Display */
+      h1, h2, h3, h4, h5, h6, button, input, select, .font-display { 
+        font-family: 'Red Hat Display', 'Noto Sans JP', sans-serif; 
+      }
+      
+      /* Custom scrollbar for webkit */
+      ::-webkit-scrollbar {
+        width: 8px;
+        height: 8px;
+      }
+      ::-webkit-scrollbar-track {
+        background: transparent; 
+      }
+      ::-webkit-scrollbar-thumb {
+        background: #cbd5e1; 
+        border-radius: 4px;
+      }
+      ::-webkit-scrollbar-thumb:hover {
+        background: #94a3b8; 
+      }
+      
+      /* Smooth transition for sidebar */
+      .sidebar-transition {
+        transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.3s ease-in-out;
+      }
+    </style>
+  <script type="importmap">
+{
+  "imports": {
+    "react-dom/": "https://esm.sh/react-dom@^19.2.3/",
+    "recharts": "https://esm.sh/recharts@^3.6.0",
+    "@google/genai": "https://esm.sh/@google/genai@^1.35.0",
+    "react": "https://esm.sh/react@^19.2.3",
+    "react/": "https://esm.sh/react@^19.2.3/",
+    "marked": "https://esm.sh/marked@^17.0.1"
+  }
+}
+</script>
+</head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>
