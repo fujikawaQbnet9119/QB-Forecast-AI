@@ -306,7 +306,8 @@ export function analyzeStore(name: string, raw: number[], dates: string[], globa
                 storeResult = {
                     name, raw, dates, mask, isActive: true,
                     nudge: nudge, 
-                    nudgeDecay: 0.7, // Standard decay for startups (simplified)
+                    nudgeDecay: 1.0, // UPDATED: Parallel Shift (Launchpad Theory)
+                                     // Initial scale differences are structural potential, so we maintain the gap (Decay 1.0).
                     seasonal: finalSea,
                     components: comp,
                     params: fitP,

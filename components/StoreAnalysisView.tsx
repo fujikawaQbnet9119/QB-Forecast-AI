@@ -4,6 +4,7 @@ import { StoreData, ChartDataPoint } from '../types';
 import { logisticModel, calculatePearsonCorrelation } from '../services/analysisEngine';
 import { generateStoreReport } from '../services/geminiService';
 import { marked } from 'marked';
+import HelpTooltip from './HelpTooltip';
 import {
     LineChart, Line, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
     ComposedChart, Brush, Bar, Legend, ReferenceLine, ScatterChart, Scatter, Cell
@@ -17,6 +18,7 @@ interface StoreAnalysisViewProps {
 const StoreAnalysisView: React.FC<StoreAnalysisViewProps> = ({ allStores, forecastMonths }) => {
     const [selectedStore, setSelectedStore] = useState<string | null>(null);
     const [searchTerm, setSearchTerm] = useState("");
+    const [showClosed, setShowClosed] = useState(false); // Default: Hide closed stores
     const [activeTab, setActiveTab] = useState<'main' | 'stl' | 'zchart' | 'heatmap' | 'model'>('main');
     const [confidence, setConfidence] = useState(95);
     const [aiReport, setAiReport] = useState<string | null>(null);
@@ -29,15 +31,22 @@ const StoreAnalysisView: React.FC<StoreAnalysisViewProps> = ({ allStores, foreca
     const [simK, setSimK] = useState(1.0); // Multiplier for k
 
     const storeNames = Object.keys(allStores).sort();
-    const filteredStores = storeNames.filter(n => n.toLowerCase().includes(searchTerm.toLowerCase()));
+    
+    const filteredStores = useMemo(() => {
+        return storeNames.filter(n => {
+            const matchesSearch = n.toLowerCase().includes(searchTerm.toLowerCase());
+            const matchesStatus = showClosed ? true : allStores[n].isActive;
+            return matchesSearch && matchesStatus;
+        });
+    }, [storeNames, searchTerm, showClosed, allStores]);
 
     const currentStore = selectedStore ? allStores[selectedStore] : null;
 
     useEffect(() => {
-        if (!selectedStore && storeNames.length > 0) {
-            setSelectedStore(storeNames[0]);
+        if (!selectedStore && filteredStores.length > 0) {
+            setSelectedStore(filteredStores[0]);
         }
-    }, [allStores, storeNames, selectedStore]);
+    }, [filteredStores, selectedStore]);
 
     useEffect(() => {
         setAiReport(null); // Reset AI report when store changes
@@ -307,6 +316,15 @@ const StoreAnalysisView: React.FC<StoreAnalysisViewProps> = ({ allStores, foreca
                         value={searchTerm}
                         onChange={(e) => setSearchTerm(e.target.value)}
                     />
+                    <label className="flex items-center gap-2 mt-4 cursor-pointer select-none group">
+                        <input 
+                            type="checkbox" 
+                            checked={showClosed} 
+                            onChange={(e) => setShowClosed(e.target.checked)}
+                            className="w-4 h-4 accent-[#005EB8] rounded border-gray-300 focus:ring-[#005EB8] cursor-pointer"
+                        />
+                        <span className="text-xs font-bold text-gray-500 group-hover:text-[#005EB8] transition-colors">閉店・非稼働店舗を含める</span>
+                    </label>
                 </div>
                 <div className="flex-1 overflow-y-auto p-3 space-y-1">
                     {filteredStores.map(n => (
@@ -321,6 +339,11 @@ const StoreAnalysisView: React.FC<StoreAnalysisViewProps> = ({ allStores, foreca
                             </div>
                         </button>
                     ))}
+                    {filteredStores.length === 0 && (
+                        <div className="text-center py-8 text-xs text-gray-400 font-bold">
+                            該当する店舗が見つかりません
+                        </div>
+                    )}
                 </div>
             </div>
 
@@ -340,8 +363,8 @@ const StoreAnalysisView: React.FC<StoreAnalysisViewProps> = ({ allStores, foreca
                                 </div>
                             </div>
                             <div className="flex gap-8 text-right font-black font-display">
-                                <div><p className="text-[9px] text-gray-400 uppercase mb-1">直近適合精度 (StdDev)</p><p className="text-4xl text-[#005EB8] leading-none tracking-tighter">{Math.round(currentStore.stdDev).toLocaleString()}<span className="text-xs ml-1 text-gray-400">千円</span></p></div>
-                                <div><p className="text-[9px] text-gray-400 uppercase mb-1">ABC Rank</p><p className={`text-4xl leading-none tracking-tighter ${currentStore.stats?.abcRank === 'A' ? 'text-yellow-400' : 'text-gray-400'}`}>{currentStore.stats?.abcRank || '-'}</p></div>
+                                <div><p className="text-[9px] text-gray-400 uppercase mb-1 flex items-center justify-end">直近適合精度 (StdDev)<HelpTooltip title="StdDev (残差標準偏差)" content="AIの予測と実績のズレ（誤差）の大きさです。この数値が小さいほど、予測通りに売上が動く「読みやすい店舗」と言えます。" /></p><p className="text-4xl text-[#005EB8] leading-none tracking-tighter">{Math.round(currentStore.stdDev).toLocaleString()}<span className="text-xs ml-1 text-gray-400">千円</span></p></div>
+                                <div><p className="text-[9px] text-gray-400 uppercase mb-1 flex items-center justify-end">ABC Rank<HelpTooltip title="ABCランク" content="売上高による全社ランキング。A=上位70%、B=次点20%、C=下位10%。" /></p><p className={`text-4xl leading-none tracking-tighter ${currentStore.stats?.abcRank === 'A' ? 'text-yellow-400' : 'text-gray-400'}`}>{currentStore.stats?.abcRank || '-'}</p></div>
                             </div>
                         </div>
 
@@ -366,7 +389,10 @@ const StoreAnalysisView: React.FC<StoreAnalysisViewProps> = ({ allStores, foreca
                                 <div className="animate-fadeIn">
                                     <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 gap-4">
                                         <div className="flex items-center gap-4">
-                                            <h3 className="font-black text-gray-700 text-[11px] uppercase tracking-[0.2em] font-display">予測分布 (Prediction Distribution)</h3>
+                                            <h3 className="font-black text-gray-700 text-[11px] uppercase tracking-[0.2em] font-display flex items-center">
+                                                予測分布 (Prediction Distribution)
+                                                <HelpTooltip title="AI予測分布" content="青い点線がAIによる将来予測、薄い青色の帯が「95%の確率で収まる範囲（信頼区間）」です。実績（黒点）が帯から外れた場合、突発的な要因（キャンペーンや災害など）があったと考えられます。" />
+                                            </h3>
                                             <button 
                                                 onClick={() => setSimMode(!simMode)} 
                                                 className={`px-4 py-1.5 rounded-full text-[10px] font-black uppercase transition-all flex items-center gap-2 border ${simMode ? 'bg-purple-600 text-white border-purple-600 shadow-md shadow-purple-200' : 'bg-white text-gray-500 border-gray-200 hover:bg-gray-50'}`}
@@ -413,10 +439,10 @@ const StoreAnalysisView: React.FC<StoreAnalysisViewProps> = ({ allStores, foreca
                                         {simMode && <div className="absolute top-2 right-14 bg-purple-100 text-purple-800 text-[9px] font-black px-2 py-1 rounded border border-purple-200 animate-pulse">Simulation Active</div>}
                                     </div>
                                     <div className="grid grid-cols-4 gap-4 pt-8 border-t border-dashed border-gray-100 mt-4 text-center font-black font-display">
-                                        <div><p className="text-[9px] font-black text-gray-400 uppercase mb-1">成長速度 (k)</p><p className="text-xl text-orange-500">{currentStore.params.k.toFixed(3)}</p></div>
-                                        <div><p className="text-[9px] font-black text-gray-400 uppercase mb-1">潜在需要 (L)</p><p className="text-xl text-[#005EB8]">{Math.round(currentStore.params.L).toLocaleString()}<span className="text-xs text-gray-400 ml-1">千円</span></p></div>
-                                        <div><p className="text-[9px] font-black text-gray-400 uppercase mb-1">残差標準偏差</p><p className="text-xl font-black text-gray-600">{Math.round(currentStore.stdDev).toLocaleString()}<span className="text-xs text-gray-400 ml-1">千円</span></p></div>
-                                        <div><p className="text-[9px] font-black text-gray-400 uppercase mb-1">年平均成長率</p><p className="text-xl font-black text-green-500">{(currentStore.stats?.cagr ? currentStore.stats.cagr * 100 : 0).toFixed(1)}%</p></div>
+                                        <div><p className="text-[9px] font-black text-gray-400 uppercase mb-1 flex items-center justify-center">成長速度 (k)<HelpTooltip title="成長速度 (k)" content="店舗の立ち上がりの速さ。0.1以上が標準。低い場合は初期の認知不足の可能性があります。" /></p><p className="text-xl text-orange-500">{currentStore.params.k.toFixed(3)}</p></div>
+                                        <div><p className="text-[9px] font-black text-gray-400 uppercase mb-1 flex items-center justify-center">潜在需要 (L)<HelpTooltip title="潜在需要 (L)" content="この店舗が到達できる売上の理論上の上限値（天井）。現在の売上がこれに近い場合、これ以上伸ばすには改装などが必要です。" /></p><p className="text-xl text-[#005EB8]">{Math.round(currentStore.params.L).toLocaleString()}<span className="text-xs text-gray-400 ml-1">千円</span></p></div>
+                                        <div><p className="text-[9px] font-black text-gray-400 uppercase mb-1 flex items-center justify-center">残差標準偏差</p><p className="text-xl font-black text-gray-600">{Math.round(currentStore.stdDev).toLocaleString()}<span className="text-xs text-gray-400 ml-1">千円</span></p></div>
+                                        <div><p className="text-[9px] font-black text-gray-400 uppercase mb-1 flex items-center justify-center">年平均成長率<HelpTooltip title="CAGR (年平均成長率)" content="直近3年間でならした平均成長率。プラスなら長期的には成長トレンドです。" /></p><p className="text-xl font-black text-green-500">{(currentStore.stats?.cagr ? currentStore.stats.cagr * 100 : 0).toFixed(1)}%</p></div>
                                     </div>
                                 </div>
                             )}
@@ -425,17 +451,26 @@ const StoreAnalysisView: React.FC<StoreAnalysisViewProps> = ({ allStores, foreca
                                 <div className="space-y-6 animate-fadeIn">
                                     <div className="bg-gray-50 rounded-2xl p-4 h-[200px] relative group">
                                         <ExpandButton target="stlTrend" />
-                                        <h3 className="font-black text-gray-700 text-[10px] uppercase mb-2 font-display">トレンド要因 (Trend Component)</h3>
+                                        <h3 className="font-black text-gray-700 text-[10px] uppercase mb-2 font-display flex items-center">
+                                            トレンド要因 (Trend Component)
+                                            <HelpTooltip title="トレンド要因" content="季節性や一時的なノイズを取り除いた、店舗の「真の実力」の推移です。" />
+                                        </h3>
                                         {renderStlTrend()}
                                     </div>
                                     <div className="bg-gray-50 rounded-2xl p-4 h-[200px] relative group">
                                         <ExpandButton target="stlSeasonal" />
-                                        <h3 className="font-black text-gray-700 text-[10px] uppercase mb-2 font-display">季節要因 (Seasonal Component)</h3>
+                                        <h3 className="font-black text-gray-700 text-[10px] uppercase mb-2 font-display flex items-center">
+                                            季節要因 (Seasonal Component)
+                                            <HelpTooltip title="季節要因" content="「毎年決まって起きる売上の波」です。1.0より高い月は書き入れ時、低い月は閑散期です。" />
+                                        </h3>
                                         {renderStlSeasonal()}
                                     </div>
                                     <div className="bg-gray-50 rounded-2xl p-4 h-[200px] relative group">
                                         <ExpandButton target="stlResidual" />
-                                        <h3 className="font-black text-gray-700 text-[10px] uppercase mb-2 font-display">不規則変動・残差 (Residual / Irregular)</h3>
+                                        <h3 className="font-black text-gray-700 text-[10px] uppercase mb-2 font-display flex items-center">
+                                            不規則変動・残差 (Residual / Irregular)
+                                            <HelpTooltip title="残差 (ノイズ)" content="トレンドでも季節性でも説明できない「突発的な売上変動」です。0から大きく離れている月は何らかのイベントがあったはずです。" />
+                                        </h3>
                                         {renderStlResidual()}
                                     </div>
                                 </div>
@@ -443,7 +478,10 @@ const StoreAnalysisView: React.FC<StoreAnalysisViewProps> = ({ allStores, foreca
 
                             {activeTab === 'zchart' && (
                                 <div className="animate-fadeIn">
-                                    <h3 className="font-black text-gray-700 text-[11px] uppercase tracking-[0.2em] font-display mb-6">Zチャート (直近12ヶ月トレンド分析)</h3>
+                                    <h3 className="font-black text-gray-700 text-[11px] uppercase tracking-[0.2em] font-display mb-6 flex items-center">
+                                        Zチャート (直近12ヶ月トレンド分析)
+                                        <HelpTooltip title="Zチャート" content="売上の季節変動を無視してトレンドを見るためのチャートです。一番上の青い線（移動年計）が右肩上がりなら、季節に関係なく「実力で成長している」と言えます。" />
+                                    </h3>
                                     <div className="h-[400px] w-full relative group">
                                         <ExpandButton target="zchart" />
                                         {renderZChart()}
@@ -491,7 +529,10 @@ const StoreAnalysisView: React.FC<StoreAnalysisViewProps> = ({ allStores, foreca
                                 <div className="animate-fadeIn space-y-8">
                                     {/* Similar Stores */}
                                     <div>
-                                        <h3 className="font-black text-gray-700 text-[11px] uppercase tracking-[0.2em] font-display mb-4">類似店舗 (Nearest Neighbors)</h3>
+                                        <h3 className="font-black text-gray-700 text-[11px] uppercase tracking-[0.2em] font-display mb-4 flex items-center">
+                                            類似店舗 (Nearest Neighbors)
+                                            <HelpTooltip title="類似店舗" content="成長パターン（カーブの形）や季節変動のクセが似ている店舗をAIが抽出します。これらの店舗の成功事例は、そのままこの店にも使える可能性が高いです。" />
+                                        </h3>
                                         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                                             {similarStores.map((s, i) => (
                                                 <div key={i} className="bg-white border border-gray-200 p-4 rounded-xl shadow-sm hover:shadow-md transition-all cursor-pointer" onClick={() => setSelectedStore(s.store.name)}>

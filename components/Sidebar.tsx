@@ -2,8 +2,8 @@
 import React from 'react';
 
 interface SidebarProps {
-    currentView: 'data' | 'dashboard' | 'analytics' | 'bench' | 'store' | 'logic' | 'guide';
-    setCurrentView: (view: 'data' | 'dashboard' | 'analytics' | 'bench' | 'store' | 'logic' | 'guide') => void;
+    currentView: 'data' | 'dashboard' | 'analytics' | 'bench' | 'store' | 'table' | 'logic' | 'guide';
+    setCurrentView: (view: 'data' | 'dashboard' | 'analytics' | 'bench' | 'store' | 'table' | 'logic' | 'guide') => void;
     isOpen: boolean;
     setIsOpen: (isOpen: boolean) => void;
 }
@@ -51,6 +51,13 @@ const Sidebar: React.FC<SidebarProps> = ({ currentView, setCurrentView, isOpen, 
                     <span>全社ダッシュボード</span>
                 </div>
                 <div 
+                    className={`nav-item flex items-center gap-3 px-4 py-3 rounded-lg font-bold cursor-pointer transition-colors ${currentView === 'table' ? 'bg-blue-50 text-[#005EB8]' : 'text-slate-500 hover:bg-slate-50 hover:text-[#005EB8]'}`}
+                    onClick={() => setCurrentView('table')}
+                >
+                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 10h18M3 14h18m-9-4v8m-7-8v8m14-8v8M5 21h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v14a2 2 0 002 2z"></path></svg>
+                    <span>全店舗リスト (Table)</span>
+                </div>
+                <div 
                     className={`nav-item flex items-center gap-3 px-4 py-3 rounded-lg font-bold cursor-pointer transition-colors ${currentView === 'analytics' ? 'bg-blue-50 text-[#005EB8]' : 'text-slate-500 hover:bg-slate-50 hover:text-[#005EB8]'}`}
                     onClick={() => setCurrentView('analytics')}
                 >
@@ -72,13 +79,6 @@ const Sidebar: React.FC<SidebarProps> = ({ currentView, setCurrentView, isOpen, 
                     <span>店舗詳細分析</span>
                 </div>
                 <div 
-                    className={`nav-item flex items-center gap-3 px-4 py-3 rounded-lg font-bold cursor-pointer transition-colors ${currentView === 'guide' ? 'bg-blue-50 text-[#005EB8]' : 'text-slate-500 hover:bg-slate-50 hover:text-[#005EB8]'}`}
-                    onClick={() => setCurrentView('guide')}
-                >
-                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"></path></svg>
-                    <span>活用ガイド・用語集</span>
-                </div>
-                <div 
                     className={`nav-item flex items-center gap-3 px-4 py-3 rounded-lg font-bold cursor-pointer transition-colors ${currentView === 'logic' ? 'bg-blue-50 text-[#005EB8]' : 'text-slate-500 hover:bg-slate-50 hover:text-[#005EB8]'}`}
                     onClick={() => setCurrentView('logic')}
                 >
@@ -86,7 +86,7 @@ const Sidebar: React.FC<SidebarProps> = ({ currentView, setCurrentView, isOpen, 
                     <span>予測モデル仕様書</span>
                 </div>
             </nav>
-            <div className="p-4 border-t text-[10px] text-gray-400 text-center uppercase font-black font-display min-w-[260px]">v10.7.2 Guide Added</div>
+            <div className="p-4 border-t text-[10px] text-gray-400 text-center uppercase font-black font-display min-w-[260px]">v10.8 Context Help</div>
         </aside>
     );
 };

@@ -2,6 +2,7 @@
 import React, { useState, useMemo, useCallback } from 'react';
 import { StoreData } from '../types';
 import { logisticModel } from '../services/analysisEngine';
+import HelpTooltip from './HelpTooltip';
 import {
     LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend, Brush
 } from 'recharts';
@@ -196,15 +197,17 @@ const ComparisonView: React.FC<ComparisonViewProps> = ({ allStores }) => {
                                 <div className="flex gap-2 bg-gray-100 p-1 rounded-full">
                                     <button 
                                         onClick={() => setMode('vintage')}
-                                        className={`px-6 py-2 rounded-full text-xs font-black transition-all uppercase font-display ${mode === 'vintage' ? 'bg-white text-[#005EB8] shadow-sm' : 'text-gray-400'}`}
+                                        className={`px-6 py-2 rounded-full text-xs font-black transition-all uppercase font-display flex items-center gap-1 ${mode === 'vintage' ? 'bg-white text-[#005EB8] shadow-sm' : 'text-gray-400'}`}
                                     >
-                                        Vintage基準 (経過月数)
+                                        Vintage基準
+                                        <HelpTooltip title="Vintage基準" content="オープン日を「1ヶ月目」として横軸を揃えます。オープン時期が異なる店舗同士の「立ち上がりスピード」や「成長カーブ」を比較するのに適しています。" />
                                     </button>
                                     <button 
                                         onClick={() => setMode('calendar')}
-                                        className={`px-6 py-2 rounded-full text-xs font-black transition-all uppercase font-display ${mode === 'calendar' ? 'bg-white text-[#005EB8] shadow-sm' : 'text-gray-400'}`}
+                                        className={`px-6 py-2 rounded-full text-xs font-black transition-all uppercase font-display flex items-center gap-1 ${mode === 'calendar' ? 'bg-white text-[#005EB8] shadow-sm' : 'text-gray-400'}`}
                                     >
-                                        カレンダー基準 (時系列)
+                                        カレンダー基準
+                                        <HelpTooltip title="カレンダー基準" content="通常の時系列（2023年1月、2月...）で比較します。同じ時期に起きた外部要因（コロナ、増税、天候など）の影響を比較するのに適しています。" />
                                     </button>
                                 </div>
                                 <label className="flex items-center gap-2 text-xs font-bold text-gray-600 cursor-pointer">
@@ -242,19 +245,19 @@ const ComparisonView: React.FC<ComparisonViewProps> = ({ allStores }) => {
                                     </thead>
                                     <tbody className="divide-y divide-gray-50">
                                         <tr>
-                                            <td className="py-3 px-4 text-left font-bold text-gray-600">成長速度 (k)</td>
+                                            <td className="py-3 px-4 text-left font-bold text-gray-600 flex items-center">成長速度 (k)<HelpTooltip title="成長速度 (k)" content="値が大きいほど、短期間で急成長したことを意味します。" /></td>
                                             {selectedStores.map(name => (
                                                 <td key={name} className="py-3 px-4">{allStores[name].params.k.toFixed(3)}</td>
                                             ))}
                                         </tr>
                                         <tr>
-                                            <td className="py-3 px-4 text-left font-bold text-gray-600">潜在需要 (L)</td>
+                                            <td className="py-3 px-4 text-left font-bold text-gray-600 flex items-center">潜在需要 (L)<HelpTooltip title="潜在需要 (L)" content="その店舗が到達しうる売上の天井です。" /></td>
                                             {selectedStores.map(name => (
                                                 <td key={name} className="py-3 px-4">{Math.round(allStores[name].params.L).toLocaleString()}</td>
                                             ))}
                                         </tr>
                                         <tr>
-                                            <td className="py-3 px-4 text-left font-bold text-gray-600">年平均成長率 (CAGR)</td>
+                                            <td className="py-3 px-4 text-left font-bold text-gray-600 flex items-center">年平均成長率 (CAGR)<HelpTooltip title="CAGR" content="直近3年間の平均的な成長率です。" /></td>
                                             {selectedStores.map(name => (
                                                 <td key={name} className="py-3 px-4">{(allStores[name].stats?.cagr ? allStores[name].stats.cagr * 100 : 0).toFixed(1)}%</td>
                                             ))}

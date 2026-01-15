@@ -8,13 +8,14 @@ import AnalyticsView from './components/AnalyticsView';
 import ModelLogicView from './components/ModelLogicView';
 import GuideView from './components/GuideView';
 import ComparisonView from './components/ComparisonView';
+import StoreTableView from './components/StoreTableView';
 import { StoreData } from './types';
 
 const App: React.FC = () => {
-    const [currentView, setCurrentView] = useState<'data' | 'dashboard' | 'analytics' | 'bench' | 'store' | 'logic' | 'guide'>('data');
+    const [currentView, setCurrentView] = useState<'data' | 'dashboard' | 'analytics' | 'bench' | 'store' | 'table' | 'logic' | 'guide'>('data');
     const [allStores, setAllStores] = useState<{ [name: string]: StoreData }>({});
     const [globalMaxDate, setGlobalMaxDate] = useState<Date>(new Date());
-    const [forecastMonths, setForecastMonths] = useState(24);
+    const [forecastMonths, setForecastMonths] = useState(36);
     const [isSidebarOpen, setIsSidebarOpen] = useState(true);
 
     return (
@@ -67,6 +68,11 @@ const App: React.FC = () => {
                     <StoreAnalysisView 
                         allStores={allStores}
                         forecastMonths={forecastMonths}
+                    />
+                )}
+                {currentView === 'table' && (
+                    <StoreTableView 
+                        allStores={allStores}
                     />
                 )}
                 {currentView === 'logic' && (

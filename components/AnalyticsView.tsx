@@ -2,6 +2,7 @@
 import React, { useMemo, useState, useCallback } from 'react';
 import { StoreData } from '../types';
 import { calculatePearsonCorrelation } from '../services/analysisEngine';
+import HelpTooltip from './HelpTooltip';
 import {
     BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
     ScatterChart, Scatter, Cell, Treemap, PieChart, Pie, Legend,
@@ -25,9 +26,12 @@ const calculateGini = (values: number[]) => {
     return (2 * num) / den - (n + 1) / n;
 };
 
-const StatCard: React.FC<{ title: string; value: string | number; sub?: string; color?: string }> = ({ title, value, sub, color = "text-[#005EB8]" }) => (
+const StatCard: React.FC<{ title: string; value: string | number; sub?: string; color?: string; tooltip?: string }> = ({ title, value, sub, color = "text-[#005EB8]", tooltip }) => (
     <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-100 flex flex-col justify-between h-full">
-        <p className="text-[9px] font-black text-gray-400 uppercase tracking-wider mb-1 font-display">{title}</p>
+        <p className="text-[9px] font-black text-gray-400 uppercase tracking-wider mb-1 font-display flex items-center gap-1">
+            {title}
+            {tooltip && <HelpTooltip title={title} content={tooltip} />}
+        </p>
         <div className={`text-xl font-black font-display ${color} leading-none tracking-tight`}>{value}</div>
         {sub && <p className="text-[9px] text-gray-400 mt-1">{sub}</p>}
     </div>
@@ -105,9 +109,9 @@ const AnalyticsView: React.FC<AnalyticsViewProps> = ({ allStores }) => {
         });
         diffs.sort((a, b) => b.diff - a.diff);
         
-        // Extract top 5 positive and bottom 5 negative (largest decreases)
-        const topPos = diffs.slice(0, 5).filter(d => d.diff > 0);
-        const topNeg = diffs.slice(-5).reverse().filter(d => d.diff < 0);
+        // Extract top 10 positive and bottom 10 negative (largest decreases)
+        const topPos = diffs.slice(0, 10).filter(d => d.diff > 0);
+        const topNeg = diffs.slice(-10).reverse().filter(d => d.diff < 0);
 
         return [
             ...topPos.map(d => ({ name: d.name, val: d.diff, type: 'plus' })),
@@ -546,17 +550,20 @@ const AnalyticsView: React.FC<AnalyticsViewProps> = ({ allStores }) => {
             return { name: s.name, points };
         });
 
-        const medianK = kpis.medianK;
+        // Use 75th Percentile K for Standard Model to match DataView logic
+        const idx75 = Math.min(kValues.length - 1, Math.floor(kValues.length * 0.75));
+        const standardK = kValues.length > 0 ? kValues[idx75] : 0.1;
+
         const standardCurve = Array.from({length: 24}, (_, i) => {
-            const t0_est = Math.log(9) / medianK;
+            const t0_est = Math.log(9) / standardK;
             return {
                 month: i,
-                normVal: 1 / (1 + Math.exp(-medianK * (i - t0_est)))
+                normVal: 1 / (1 + Math.exp(-standardK * (i - t0_est)))
             };
         });
 
-        return { meanK, stdK, significantHigh, significantLow, histogramData, trajectories, standardCurve };
-    }, [stores, kpis.medianK]);
+        return { meanK, stdK, significantHigh, significantLow, histogramData, trajectories, standardCurve, standardK };
+    }, [stores]);
 
     // 8-B: Aging Curve (Average Sales by Age)
     const agingCurveData = useMemo(() => {
@@ -928,7 +935,7 @@ const AnalyticsView: React.FC<AnalyticsViewProps> = ({ allStores }) => {
                         <YAxis tick={{fontSize:9}} domain={[0, 1.2]} label={{ value: '達成率 (Sales/L)', angle: -90, position: 'left', offset: 0, fontSize: 9 }} />
                         <Tooltip formatter={(val: number) => val.toFixed(2)} contentStyle={{borderRadius:'12px', border:'none', boxShadow:'0 10px 15px -3px rgba(0,0,0,0.1)'}} />
                         <Legend wrapperStyle={{ fontSize: '9px', paddingTop: '10px' }} iconSize={8} />
-                        <Line data={growthAnalysis.standardCurve} type="monotone" dataKey="normVal" stroke="#1A1A1A" strokeWidth={2} strokeDasharray="5 5" dot={false} name="標準モデル (Median k)" z={10} />
+                        <Line data={growthAnalysis.standardCurve} type="monotone" dataKey="normVal" stroke="#1A1A1A" strokeWidth={2} strokeDasharray="5 5" dot={false} name={`標準モデル (75%tile k=${growthAnalysis.standardK.toFixed(3)})`} z={10} />
                         {growthAnalysis.trajectories.map((s, i) => (
                             <Line key={s.name} data={s.points} type="monotone" dataKey="normVal" name={s.name} stroke={`hsl(${i * 45}, 70%, 60%)`} strokeWidth={1.5} dot={false} strokeOpacity={0.6} />
                         ))}
@@ -1015,17 +1022,17 @@ const AnalyticsView: React.FC<AnalyticsViewProps> = ({ allStores }) => {
                 <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-3">
                     <StatCard title="稼働店舗数" value={kpis.activeCount} />
                     <StatCard title="全登録店舗" value={kpis.totalCount} color="text-gray-500" />
-                    <StatCard title="稼働率" value={`${kpis.activeRate.toFixed(1)}%`} color={kpis.activeRate > 90 ? "text-green-500" : "text-orange-500"} />
+                    <StatCard title="稼働率" value={`${kpis.activeRate.toFixed(1)}%`} color={kpis.activeRate > 90 ? "text-green-500" : "text-orange-500"} tooltip="全登録店舗のうち、現在も売上が発生している（閉店していない）店舗の割合。" />
                     <StatCard title="平均店舗月齢" value={`${Math.round(kpis.avgAge)}ヶ月`} />
-                    <StatCard title="平均店舗月商" value={Math.round(kpis.avgSales / 10).toLocaleString() + '万円'} />
-                    <StatCard title="昨対成長率" value={`${(kpis.avgYoy * 100).toFixed(1)}%`} color={kpis.avgYoy > 0 ? "text-green-500" : "text-red-500"} />
-                    <StatCard title="ジニ係数" value={kpis.gini.toFixed(2)} color={kpis.gini > 0.4 ? "text-red-500" : "text-green-500"} />
-                    <StatCard title="平均効率(Sales/L)" value={`${(kpis.avgEff * 100).toFixed(0)}%`} />
-                    <StatCard title="Median Growth(k)" value={kpis.medianK.toFixed(3)} />
-                    <StatCard title="Median Potential(L)" value={Math.round(kpis.medianL / 10).toLocaleString() + '万円'} />
-                    <StatCard title="平均変動率(CV)" value={`${(kpis.avgCV * 100).toFixed(1)}%`} />
+                    <StatCard title="平均店舗月商" value={Math.round(kpis.avgSales / 10).toLocaleString() + '万円'} tooltip="直近1年間の平均月商。" />
+                    <StatCard title="昨対成長率" value={`${(kpis.avgYoy * 100).toFixed(1)}%`} color={kpis.avgYoy > 0 ? "text-green-500" : "text-red-500"} tooltip="全店の売上合計の、昨年対比の成長率。" />
+                    <StatCard title="ジニ係数" value={kpis.gini.toFixed(2)} color={kpis.gini > 0.4 ? "text-red-500" : "text-green-500"} tooltip="売上の「格差」を示す指標。0に近いほど平等、1に近いほど格差大。0.4を超えると一部の店舗に依存しすぎている状態。" />
+                    <StatCard title="平均効率(Sales/L)" value={`${(kpis.avgEff * 100).toFixed(0)}%`} tooltip="店舗の潜在能力(L)をどれくらい使い切っているか。100%に近いほど満席状態。" />
+                    <StatCard title="Median Growth(k)" value={kpis.medianK.toFixed(3)} tooltip="店舗の立ち上がりの速さ(k)の中央値。0.1以上あれば標準的。" />
+                    <StatCard title="Median Potential(L)" value={Math.round(kpis.medianL / 10).toLocaleString() + '万円'} tooltip="店舗の潜在売上規模(L)の中央値。" />
+                    <StatCard title="平均変動率(CV)" value={`${(kpis.avgCV * 100).toFixed(1)}%`} tooltip="売上のバラつき具合。0.1以下なら安定、0.2以上なら不安定。" />
                     <StatCard title="総売上規模(Annual)" value={(kpis.totalSales / 100000).toFixed(1) + '億円'} />
-                    <StatCard title="Aランク比率" value={`${((abcData[0].value / stores.length)*100).toFixed(0)}%`} />
+                    <StatCard title="Aランク比率" value={`${((abcData[0].value / stores.length)*100).toFixed(0)}%`} tooltip="売上上位70%を構成する店舗の割合。" />
                     <StatCard title="Top 10シェア" value="18.2%" color="text-gray-400" />
                     <StatCard title="生存率(5yr)" value="82%" color="text-gray-400" />
                     <StatCard title="データ品質" value="High" color="text-green-500" />
@@ -1033,17 +1040,16 @@ const AnalyticsView: React.FC<AnalyticsViewProps> = ({ allStores }) => {
 
                 {/* Content Area */}
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                    {/* ... (Rest of the component remains largely the same, chart rendering logic handles the data) ... */}
-                    {/* Just need to ensure the Chart Rendering calls above use the updated data memos */}
-                    {/* I'll include the rest of the return block to be safe, though no changes needed in JSX structure */}
-                    
                     {/* --- RANKING TAB --- */}
                     {activeTab === 'ranking' && (
                         <>
                             {/* Streak Counter (NEW) */}
                             <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-100 h-[360px] relative group">
                                 <ExpandButton target="streak" />
-                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display">ストリーク・カウンター (連続増収/減収記録)</h3>
+                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display flex items-center">
+                                    ストリーク・カウンター (連続増収/減収記録)
+                                    <HelpTooltip title="ストリーク（連続記録）" content="昨対比プラス（またはマイナス）が何ヶ月連続で続いているかを表示します。緑が長い店は絶好調、赤が長い店は要注意です。" />
+                                </h3>
                                 <div className="h-full pb-8">
                                     {renderChart('streak')}
                                 </div>
@@ -1052,7 +1058,10 @@ const AnalyticsView: React.FC<AnalyticsViewProps> = ({ allStores }) => {
                             {/* Store LTV Ranking (NEW) */}
                             <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-100 h-[360px] relative group">
                                 <ExpandButton target="ltv" />
-                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display">店舗生涯価値ランキング (Store LTV - Cumulative Sales)</h3>
+                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display flex items-center">
+                                    店舗生涯価値ランキング (Cumulative Sales)
+                                    <HelpTooltip title="LTV (Life Time Value)" content="オープンから現在までの「総売上高」です。長く営業し、かつ売上が高い「会社への貢献度が最も高い店舗」がわかります。" />
+                                </h3>
                                 <div className="h-full pb-8">
                                     {renderChart('ltv')}
                                 </div>
@@ -1061,7 +1070,10 @@ const AnalyticsView: React.FC<AnalyticsViewProps> = ({ allStores }) => {
                             {/* Stability Ranking (NEW) */}
                             <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-100 h-[360px] relative group">
                                 <ExpandButton target="stability" />
-                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display">売上安定性ランキング (Stability Score)</h3>
+                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display flex items-center">
+                                    売上安定性ランキング (Stability Score)
+                                    <HelpTooltip title="安定性スコア" content="毎月の売上のブレが少ない（計算ができる）店舗ランキングです。スコアが高いほど、毎月安定した売上を上げています。" />
+                                </h3>
                                 <div className="h-full pb-8">
                                     {renderChart('stability')}
                                 </div>
@@ -1070,7 +1082,10 @@ const AnalyticsView: React.FC<AnalyticsViewProps> = ({ allStores }) => {
                             {/* ABC Analysis */}
                             <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-100 relative overflow-hidden h-[360px] group">
                                 <ExpandButton target="abc" />
-                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display">パレート構成比 (ABC分析)</h3>
+                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display flex items-center">
+                                    パレート構成比 (ABC分析)
+                                    <HelpTooltip title="ABC分析" content="全売上の70%を作る「Aランク」、次の20%を作る「Bランク」、下位10%の「Cランク」に分類します。Aランク店舗の維持が経営の最優先事項です。" />
+                                </h3>
                                 <div className="h-full pb-8">
                                     {renderChart('abc')}
                                 </div>
@@ -1083,16 +1098,22 @@ const AnalyticsView: React.FC<AnalyticsViewProps> = ({ allStores }) => {
                             {/* Lorenz Curve (New) */}
                             <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-100 h-[360px] relative group">
                                 <ExpandButton target="lorenz" />
-                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display">ローレンツ曲線 (店舗間格差分析)</h3>
+                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display flex items-center">
+                                    ローレンツ曲線 (店舗間格差分析)
+                                    <HelpTooltip title="ローレンツ曲線" content="青いエリアが膨らんでいるほど、「一部の店舗だけが売れていて、他は売れていない（格差が大きい）」状態を示します。" />
+                                </h3>
                                 <div className="h-full pb-8">
                                     {renderChart('lorenz')}
                                 </div>
                             </div>
 
                             {/* Waterfall */}
-                            <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-100 h-[360px] relative group">
+                            <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-100 h-[720px] relative group">
                                 <ExpandButton target="waterfall" />
-                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display">売上増減要因分析 (Contribution Waterfall - Top/Bottom)</h3>
+                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display flex items-center">
+                                    売上増減要因分析 (Waterfall)
+                                    <HelpTooltip title="ウォーターフォール分析" content="昨年に比べて、どの店舗が売上を増やし(緑)、どの店舗が減らしたか(赤)を可視化します。大きな赤バーの店舗には即座に対策が必要です。" />
+                                </h3>
                                 <div className="h-full pb-8">
                                     {renderChart('waterfall')}
                                 </div>
@@ -1101,7 +1122,10 @@ const AnalyticsView: React.FC<AnalyticsViewProps> = ({ allStores }) => {
                              {/* Opportunity Gap Ranking (New) */}
                              <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-100 h-[360px] relative group">
                                 <ExpandButton target="opportunity" />
-                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display">伸びしろランキング (Potential Gap)</h3>
+                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display flex items-center">
+                                    伸びしろランキング (Potential Gap)
+                                    <HelpTooltip title="伸びしろ (Gap)" content="AIが予測した「本来の実力(L)」に対して、現在の売上がどれくらい低いかを示します。バーが長いほど「もっと売れるはず」の店舗です。" />
+                                </h3>
                                 <div className="h-full pb-8">
                                     {renderChart('opportunity')}
                                 </div>
@@ -1157,7 +1181,10 @@ const AnalyticsView: React.FC<AnalyticsViewProps> = ({ allStores }) => {
                             {/* Cluster Benchmark Trajectories (NEW) */}
                             <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-100 h-[360px] relative group">
                                 <ExpandButton target="clusterBench" />
-                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display">規模別成長ベンチマーク (Cluster Growth Trajectory)</h3>
+                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display flex items-center">
+                                    規模別成長ベンチマーク (Cluster Growth)
+                                    <HelpTooltip title="規模別ベンチマーク" content="店舗を「大・中・小」の3グループに分け、それぞれの平均的な成長カーブを表示します。自店がどのグループの平均より上か下かを確認できます。" />
+                                </h3>
                                 <div className="h-full pb-8">
                                     {renderChart('clusterBench')}
                                 </div>
@@ -1166,7 +1193,10 @@ const AnalyticsView: React.FC<AnalyticsViewProps> = ({ allStores }) => {
                             {/* MA Divergence Heatmap (NEW) */}
                             <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-100 h-[360px] relative group">
                                 <ExpandButton target="maDivergence" />
-                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display">移動平均乖離率ヒートマップ (Trend Reversal)</h3>
+                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display flex items-center">
+                                    移動平均乖離率 (Trend Reversal)
+                                    <HelpTooltip title="移動平均乖離率" content="直近の売上が「過去12ヶ月の平均」からどれくらい離れているかを見ます。大きくプラスなら急上昇中、マイナスなら急落中です。" />
+                                </h3>
                                 <div className="h-full pb-8">
                                     {renderChart('maDivergence')}
                                 </div>
@@ -1175,7 +1205,10 @@ const AnalyticsView: React.FC<AnalyticsViewProps> = ({ allStores }) => {
                             {/* Rolling CAGR (NEW) */}
                             <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-100 h-[360px] relative group">
                                 <ExpandButton target="rollingCagr" />
-                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display">ローリングCAGR推移 (3年成長率の変化)</h3>
+                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display flex items-center">
+                                    ローリングCAGR推移 (Rolling CAGR)
+                                    <HelpTooltip title="ローリングCAGR" content="「3年間の平均成長率」が年々どう変化しているかを表示します。右肩下がりなら、成長力が鈍化しています。" />
+                                </h3>
                                 <div className="h-full pb-8">
                                     {renderChart('rollingCagr')}
                                 </div>
@@ -1184,7 +1217,10 @@ const AnalyticsView: React.FC<AnalyticsViewProps> = ({ allStores }) => {
                             {/* SAAR (NEW) */}
                             <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-100 h-[360px] relative group">
                                 <ExpandButton target="saar" />
-                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display">季節調整済み年率換算推移 (SAAR)</h3>
+                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display flex items-center">
+                                    季節調整済み年率換算 (SAAR)
+                                    <HelpTooltip title="SAAR (年率換算)" content="「今のペースで1年間営業したらどれくらいの売上になるか」の推定値です。季節の影響を除いて、純粋な勢いを比較できます。" />
+                                </h3>
                                 <div className="h-full pb-8">
                                     {renderChart('saar')}
                                 </div>
@@ -1193,7 +1229,10 @@ const AnalyticsView: React.FC<AnalyticsViewProps> = ({ allStores }) => {
                             {/* Normalized Growth Trajectory */}
                             <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-100 h-[360px] relative group">
                                 <ExpandButton target="trajectory" />
-                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display">初動成長軌跡比較 (Normalized Trajectory)</h3>
+                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display flex items-center">
+                                    初動成長軌跡比較 (Normalized Trajectory)
+                                    <HelpTooltip title="初動成長軌跡" content="主要店舗のオープンからの成長カーブを重ねて表示します。角度が急な線ほど、立ち上がりが早かった優秀な店舗です。" />
+                                </h3>
                                 <div className="h-full pb-8">
                                     {renderChart('trajectory')}
                                 </div>
@@ -1202,7 +1241,10 @@ const AnalyticsView: React.FC<AnalyticsViewProps> = ({ allStores }) => {
                             {/* Lifecycle Scatter (New) */}
                             <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-100 h-[360px] relative group">
                                 <ExpandButton target="lifecycle" />
-                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display">ライフサイクル分析 (Age vs Sales)</h3>
+                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display flex items-center">
+                                    ライフサイクル分析 (Age vs Sales)
+                                    <HelpTooltip title="ライフサイクル分析" content="横軸に店舗年齢、縦軸に売上をとったグラフです。右に行く（古くなる）につれて売上が下がっている場合、店舗の老朽化・陳腐化が進んでいます。" />
+                                </h3>
                                 <div className="h-full pb-8">
                                     {renderChart('lifecycle')}
                                 </div>
@@ -1211,7 +1253,10 @@ const AnalyticsView: React.FC<AnalyticsViewProps> = ({ allStores }) => {
                             {/* Seasonality Radar */}
                             <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-100 h-[360px] relative group">
                                 <ExpandButton target="radar" />
-                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display">全社季節性DNA (平均季節指数)</h3>
+                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display flex items-center">
+                                    全社季節性DNA (平均季節指数)
+                                    <HelpTooltip title="季節指数レーダー" content="全店舗の平均的な季節変動パターンです。外側に膨らんでいる月が書き入れ時、凹んでいる月が閑散期です。" />
+                                </h3>
                                 <div className="h-full pb-8">
                                     {renderChart('radar')}
                                 </div>
@@ -1220,7 +1265,10 @@ const AnalyticsView: React.FC<AnalyticsViewProps> = ({ allStores }) => {
                              {/* CAGR Distribution */}
                              <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-100 h-[360px] relative group">
                                 <ExpandButton target="cagr" />
-                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display">年平均成長率 (CAGR) 分布 [3年]</h3>
+                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display flex items-center">
+                                    年平均成長率 (CAGR) 分布 [3年]
+                                    <HelpTooltip title="CAGR分布" content="直近3年間で年率何%成長したかの分布です。プラス（右側）の店舗が多いほど、会社全体として健全に成長しています。" />
+                                </h3>
                                 <div className="h-full pb-8">
                                     {renderChart('cagr')}
                                 </div>
@@ -1234,7 +1282,10 @@ const AnalyticsView: React.FC<AnalyticsViewProps> = ({ allStores }) => {
                             {/* Max Drawdown (NEW) */}
                             <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-100 h-[360px] relative group">
                                 <ExpandButton target="maxDrawdown" />
-                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display">最大ドローダウン分布 (Max Drawdown)</h3>
+                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display flex items-center">
+                                    最大ドローダウン分布 (Max Drawdown)
+                                    <HelpTooltip title="最大ドローダウン" content="過去の最高売上から、最大で何%落ち込んだことがあるかを示します。右側（減少率が大きい）にある店舗ほど、過去に大きな失敗や危機を経験しています。" />
+                                </h3>
                                 <div className="h-full pb-8">
                                     {renderChart('maxDrawdown')}
                                 </div>
@@ -1243,7 +1294,10 @@ const AnalyticsView: React.FC<AnalyticsViewProps> = ({ allStores }) => {
                             {/* ATH Drawdown (NEW) */}
                             <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-100 h-[360px] relative group">
                                 <ExpandButton target="athDrawdown" />
-                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display">過去最高売上からの下落率 (ATH Drawdown)</h3>
+                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display flex items-center">
+                                    過去最高売上からの下落率 (ATH Drawdown)
+                                    <HelpTooltip title="ATHからの下落率" content="「過去最高売上(All Time High)」と比べて、現在の売上がどれくらい下がっているかです。数字が大きい店舗は、かつての栄光を取り戻せていません。" />
+                                </h3>
                                 <div className="h-full pb-8">
                                     {renderChart('athDrawdown')}
                                 </div>
@@ -1252,7 +1306,10 @@ const AnalyticsView: React.FC<AnalyticsViewProps> = ({ allStores }) => {
                             {/* Volatility Smile (NEW) */}
                             <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-100 h-[360px] relative group">
                                 <ExpandButton target="smile" />
-                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display">ボラティリティ・スマイル (規模 vs 変動率)</h3>
+                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display flex items-center">
+                                    ボラティリティ・スマイル (規模 vs 変動率)
+                                    <HelpTooltip title="ボラティリティ・スマイル" content="横軸に売上規模、縦軸に不安定さ(CV)をとった図です。通常、規模が大きい店ほど安定（右下）します。右上（規模が大きいのに不安定）にある店は要注意です。" />
+                                </h3>
                                 <div className="h-full pb-8">
                                     {renderChart('smile')}
                                 </div>
@@ -1261,7 +1318,10 @@ const AnalyticsView: React.FC<AnalyticsViewProps> = ({ allStores }) => {
                             {/* Survival Analysis */}
                             <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-100 h-[360px] relative group">
                                 <ExpandButton target="survival" />
-                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display">生存率分析 (Survival Rate by Vintage Year)</h3>
+                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display flex items-center">
+                                    生存率分析 (Survival Rate by Vintage Year)
+                                    <HelpTooltip title="生存率分析" content="その年にオープンした店舗のうち、何%が現在も営業しているかを示します。生存率が急に下がっている年代は、出店戦略に問題があった可能性があります。" />
+                                </h3>
                                 <div className="h-full pb-8">
                                     {renderChart('survival')}
                                 </div>
@@ -1270,7 +1330,10 @@ const AnalyticsView: React.FC<AnalyticsViewProps> = ({ allStores }) => {
                             {/* Risk/Return Scatter */}
                             <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-100 h-[360px] relative group">
                                 <ExpandButton target="risk" />
-                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display">リスク・リターン分析 (CV vs CAGR)</h3>
+                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display flex items-center">
+                                    リスク・リターン分析 (CV vs CAGR)
+                                    <HelpTooltip title="リスク・リターン分析" content="「ハイリスク・ハイリターン」の原則通りかを見ます。右下（ローリスク・ハイリターン）にある店舗が最も優秀です。" />
+                                </h3>
                                 <div className="h-full pb-8">
                                     {renderChart('risk')}
                                 </div>
@@ -1279,7 +1342,10 @@ const AnalyticsView: React.FC<AnalyticsViewProps> = ({ allStores }) => {
                             {/* Volatility Histogram */}
                             <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-100 h-[360px] relative group">
                                 <ExpandButton target="cvHist" />
-                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display">安定性分布 (変動係数ヒストグラム)</h3>
+                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display flex items-center">
+                                    安定性分布 (変動係数ヒストグラム)
+                                    <HelpTooltip title="安定性分布" content="売上のブレ幅(CV)の分布です。左側（0に近い）が多いほど、会社全体の売上が安定しています。" />
+                                </h3>
                                 <div className="h-full pb-8">
                                     {renderChart('cvHist')}
                                 </div>
@@ -1288,7 +1354,10 @@ const AnalyticsView: React.FC<AnalyticsViewProps> = ({ allStores }) => {
                             {/* Model Fit Quality (New) */}
                             <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-100 h-[360px] relative group">
                                 <ExpandButton target="errorHist" />
-                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display">モデル適合精度分布 (Error Rate)</h3>
+                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display flex items-center">
+                                    モデル適合精度分布 (Error Rate)
+                                    <HelpTooltip title="モデル適合精度" content="AIの予測がどれくらい当たっているかの分布です。左側（誤差が小さい）に寄っているほど、AIの予測信頼度が高いことを意味します。" />
+                                </h3>
                                 <div className="h-full pb-8">
                                     {renderChart('errorHist')}
                                 </div>
@@ -1302,7 +1371,10 @@ const AnalyticsView: React.FC<AnalyticsViewProps> = ({ allStores }) => {
                             {/* Peak Month Distribution */}
                             <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-100 h-[360px] relative group">
                                 <ExpandButton target="peak" />
-                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display">ピーク月分布 (Peak Month Histogram)</h3>
+                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display flex items-center">
+                                    ピーク月分布 (Peak Month Histogram)
+                                    <HelpTooltip title="ピーク月分布" content="「何月が一番売れるか」を店舗ごとに集計したものです。特定の月に集中している場合、その時期の全社的なキャンペーンや人員配置が重要になります。" />
+                                </h3>
                                 <div className="h-full pb-8">
                                     {renderChart('peak')}
                                 </div>
@@ -1310,7 +1382,10 @@ const AnalyticsView: React.FC<AnalyticsViewProps> = ({ allStores }) => {
 
                             {/* Correlation Heatmap */}
                             <div className="md:col-span-2 bg-white rounded-2xl p-5 shadow-sm border border-gray-100">
-                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-6 font-display">売上連動性ヒートマップ (Correlation Matrix - Top 10)</h3>
+                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-6 font-display flex items-center">
+                                    売上連動性ヒートマップ (Correlation Matrix - Top 10)
+                                    <HelpTooltip title="売上連動性ヒートマップ" content="売上上位10店舗の間で、売上の動きがどれくらい似ているかを示します。青が濃い組み合わせは「似た動き」をするため、同じ成功事例を展開しやすい関係にあります。" />
+                                </h3>
                                 <div className="overflow-x-auto">
                                     <table className="min-w-full text-[10px] text-center border-collapse">
                                         <thead>
@@ -1355,7 +1430,10 @@ const AnalyticsView: React.FC<AnalyticsViewProps> = ({ allStores }) => {
                     {activeTab === 'price' && (
                          <div className="md:col-span-2 space-y-6">
                             <div className="bg-white rounded-3xl p-8 shadow-sm border border-gray-100">
-                                <h3 className="text-xl font-black text-gray-800 uppercase tracking-tight mb-8 font-display border-l-4 border-[#005EB8] pl-4">プライシング・インパクト・シミュレータ</h3>
+                                <h3 className="text-xl font-black text-gray-800 uppercase tracking-tight mb-8 font-display border-l-4 border-[#005EB8] pl-4 flex items-center">
+                                    プライシング・インパクト・シミュレータ
+                                    <HelpTooltip title="価格シミュレータ" content="「値上げ」をした場合の売上変化をシミュレーションします。値上げによる増収効果（緑）と、客離れによる減収効果（赤）のバランスを計算し、最終的にプラスになるかマイナスになるかを判定します。" />
+                                </h3>
                                 
                                 <div className="grid grid-cols-1 md:grid-cols-3 gap-8 mb-10 bg-slate-50 p-6 rounded-2xl border border-slate-200">
                                     <div>
@@ -1409,7 +1487,10 @@ const AnalyticsView: React.FC<AnalyticsViewProps> = ({ allStores }) => {
                             {/* Aging Curve (NEW) */}
                             <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-100 h-[360px] relative group">
                                 <ExpandButton target="aging" />
-                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display">店舗年齢別 平均売上カーブ (Aging Curve - Median)</h3>
+                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display flex items-center">
+                                    店舗年齢別 平均売上カーブ (Aging Curve)
+                                    <HelpTooltip title="Aging Curve" content="オープンしてからの月数ごとの平均売上推移です。青い帯（範囲）より下にある場合、その店舗は一般的な成長軌道に乗れていません。" />
+                                </h3>
                                 <div className="h-full pb-8">
                                     {renderChart('aging')}
                                 </div>
@@ -1418,7 +1499,10 @@ const AnalyticsView: React.FC<AnalyticsViewProps> = ({ allStores }) => {
                             {/* L Utilization Meter (NEW) */}
                             <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-100 h-[360px] relative group">
                                 <ExpandButton target="utilization" />
-                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display">潜在需要(L) 消化率分布 (Capacity Utilization)</h3>
+                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display flex items-center">
+                                    潜在需要(L) 消化率分布 (Capacity Utilization)
+                                    <HelpTooltip title="L消化率" content="店舗のポテンシャル(L)をどれくらい使い切っているかの分布です。90%以上の店舗は満杯状態なので、これ以上売上を伸ばすには客単価アップか回転率向上が必要です。" />
+                                </h3>
                                 <div className="h-full pb-8">
                                     {renderChart('utilization')}
                                 </div>
@@ -1427,7 +1511,10 @@ const AnalyticsView: React.FC<AnalyticsViewProps> = ({ allStores }) => {
                             {/* Growth Rate Distribution */}
                             <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-100 h-[360px] relative group">
                                 <ExpandButton target="growthK" />
-                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display">成長速度 (k) 分布 [成熟店舗]</h3>
+                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display flex items-center">
+                                    成長速度 (k) 分布 [成熟店舗]
+                                    <HelpTooltip title="成長速度(k)分布" content="店舗の立ち上がりの速さの分布です。分布の山より右側にある店舗は、オープン直後のロケットスタートに成功した優秀な店舗です。" />
+                                </h3>
                                 <div className="h-full pb-8">
                                     {renderChart('growthK')}
                                 </div>
@@ -1435,7 +1522,10 @@ const AnalyticsView: React.FC<AnalyticsViewProps> = ({ allStores }) => {
 
                             {/* Deviation Ranking */}
                             <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-100">
-                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display">成長速度 乖離ランキング (Significant Deviations)</h3>
+                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display flex items-center">
+                                    成長速度 乖離ランキング (Significant Deviations)
+                                    <HelpTooltip title="成長速度の異常値" content="平均的な成長速度と比べて、極端に早い（緑）または遅い（赤）店舗のリストです。極端に遅い店舗は、初期の認知不足や立地の視認性に問題があることが多いです。" />
+                                </h3>
                                 <div className="grid grid-cols-2 gap-4 h-[280px]">
                                     <div className="overflow-y-auto">
                                         <h4 className="text-[10px] font-bold text-green-600 uppercase mb-2">High Growth Outliers (k &gt; +1.5σ)</h4>
@@ -1465,7 +1555,10 @@ const AnalyticsView: React.FC<AnalyticsViewProps> = ({ allStores }) => {
                             {/* New Store Trajectories */}
                             <div className="md:col-span-2 bg-white rounded-2xl p-5 shadow-sm border border-gray-100 h-[400px] relative group">
                                 <ExpandButton target="newStore" />
-                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display">新規店 初動軌跡比較 (Actual vs Standard Model)</h3>
+                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display flex items-center">
+                                    新規店 初動軌跡比較 (Actual vs Standard Model)
+                                    <HelpTooltip title="新規店 初動比較" content="最近オープンした店舗の成長カーブを、全社標準モデル（点線）と比較します。実線が点線より上にあれば、その新店は「優等生」です。" />
+                                </h3>
                                 <div className="h-full pb-8">
                                     {renderChart('newStore')}
                                 </div>

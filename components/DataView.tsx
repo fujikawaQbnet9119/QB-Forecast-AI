@@ -242,7 +242,7 @@ const DataView: React.FC<DataViewProps> = ({ setAllStores, setGlobalMaxDate, for
                             <label className="text-[10px] font-black text-gray-500 uppercase block mb-4 font-display">将来予測期間 (月数)</label>
                             <div className="flex items-center gap-6">
                                 <input 
-                                    type="range" min="6" max="60" value={forecastMonths} 
+                                    type="range" min="6" max="36" value={forecastMonths} 
                                     onChange={(e) => setForecastMonths(parseInt(e.target.value))}
                                     className="flex-1 h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-[#005EB8]"
                                 />

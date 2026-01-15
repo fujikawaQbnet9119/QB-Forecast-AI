@@ -2,10 +2,11 @@
 import React, { useMemo, useState, useCallback } from 'react';
 import { StoreData, BubblePoint } from '../types';
 import { logisticModel } from '../services/analysisEngine';
+import HelpTooltip from './HelpTooltip';
 import {
     LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
     ScatterChart, Scatter, ZAxis, Legend, Brush, ReferenceLine, Label,
-    AreaChart, Area
+    AreaChart, Area, ComposedChart, Bar
 } from 'recharts';
 
 interface DashboardViewProps {
@@ -20,26 +21,60 @@ const DashboardView: React.FC<DashboardViewProps> = ({ allStores, forecastMonths
     const [showForecastTable, setShowForecastTable] = useState(true);
     const [expandedChart, setExpandedChart] = useState<string | null>(null);
 
-    const { chartData, totalForecast, bubbleData, vintageData, maxLen, qMedians, stackedAreaData, allCohorts, monthlyForecasts, axisDomains } = useMemo(() => {
+    const { 
+        chartData, 
+        totalForecast, 
+        bubbleData, 
+        vintageData, 
+        maxLen, 
+        qMedians, 
+        stackedAreaData, 
+        allCohorts, 
+        monthlyForecasts, 
+        axisDomains,
+        segmentedData, // New: Mature vs New Sales
+        growthRateData // New: Mature vs New Growth Rate
+    } = useMemo(() => {
         if (stores.length === 0) return { 
             chartData: [], totalForecast: 0, bubbleData: [], vintageData: [], maxLen: 0, qMedians: {x:0, y:0},
-            stackedAreaData: [], allCohorts: [], monthlyForecasts: [], axisDomains: { x: ['auto', 'auto'], y: ['auto', 'auto'] }
+            stackedAreaData: [], allCohorts: [], monthlyForecasts: [], axisDomains: { x: ['auto', 'auto'], y: ['auto', 'auto'] },
+            segmentedData: [], growthRateData: []
         };
 
-        // --- 1. Total Forecast Chart Data ---
+        // --- 1. Total Forecast Chart Data & Preparation ---
         const dSet = new Set<string>();
         stores.forEach(s => s.dates.forEach(d => dSet.add(d)));
-        // Fix: Sort dates chronologically using Date objects instead of string comparison
         const dates = Array.from(dSet).sort((a, b) => {
             return new Date(a.replace(/\//g, '-')).getTime() - new Date(b.replace(/\//g, '-')).getTime();
         });
         
+        // Helper to categorize stores
+        const isMature = (s: StoreData) => s.raw.length >= 36;
+
+        // Historical Data Aggregation
         const histData = dates.map(d => {
-            const sum = stores.reduce((acc, s) => {
+            let total = 0;
+            let mature = 0;
+            let young = 0;
+
+            stores.forEach(s => {
                 const idx = s.dates.indexOf(d);
-                return acc + (idx >= 0 ? (s.raw[idx] || 0) : 0);
-            }, 0);
-            return { date: d, actual: Math.round(sum), forecast: null as number | null };
+                if (idx >= 0) {
+                    const val = s.raw[idx] || 0;
+                    total += val;
+                    if (isMature(s)) mature += val;
+                    else young += val;
+                }
+            });
+            return { 
+                date: d, 
+                actual: Math.round(total), 
+                forecast: null as number | null,
+                matureActual: Math.round(mature),
+                newActual: Math.round(young),
+                matureForecast: null as number | null,
+                newForecast: null as number | null
+            };
         });
 
         const lastD = new Date(dates[dates.length - 1].replace(/\//g, '-'));
@@ -47,26 +82,89 @@ const DashboardView: React.FC<DashboardViewProps> = ({ allStores, forecastMonths
         let finalSum = 0;
         const monthlyFs = [];
 
+        // Combine history for lookups
+        const allPoints = [...histData];
+
         for (let t = 1; t <= forecastMonths; t++) {
             const fd = new Date(lastD);
             fd.setMonth(lastD.getMonth() + t);
             const label = `${fd.getFullYear()}-${String(fd.getMonth() + 1).padStart(2, '0')}`;
             
             let sum = 0;
+            let sumMature = 0;
+            let sumNew = 0;
+
             stores.forEach(s => {
                 if (!s.isActive) return;
                 const tr = logisticModel(s.raw.length + t - 1, s.fit.params, s.fit.mode, s.fit.shockIdx);
                 const decay = s.nudgeDecay !== undefined ? s.nudgeDecay : 0.7;
-                const val = (tr * (s.seasonal[fd.getMonth()] || 1.0)) + (s.nudge * Math.pow(decay, t));
-                sum += val;
+                const seasonalVal = s.seasonal[fd.getMonth()] || 1.0;
+                const val = (tr * seasonalVal) + (s.nudge * Math.pow(decay, t));
+                const finalVal = val < 0 ? 0 : val;
+                
+                sum += finalVal;
+                if (isMature(s)) sumMature += finalVal;
+                else sumNew += finalVal;
             });
-            sum = sum < 0 ? 0 : sum;
+
             if (t === forecastMonths) finalSum = sum;
-            forecastData.push({ date: label, actual: null, forecast: Math.round(sum) });
-            monthlyFs.push({ date: label, val: Math.round(sum) });
+            
+            // YoY Calculation for the table
+            // Find value 12 months ago
+            const lookbackIndex = allPoints.length - 12;
+            let prevVal = 0;
+            if (lookbackIndex >= 0) {
+                // Use actual if available, otherwise forecast
+                const p = allPoints[lookbackIndex];
+                prevVal = p.actual !== null ? p.actual : (p.forecast || 0);
+            }
+            
+            const yoy = prevVal > 0 ? ((sum - prevVal) / prevVal) : 0;
+
+            const point = { 
+                date: label, 
+                actual: null, 
+                forecast: Math.round(sum),
+                matureActual: null,
+                newActual: null,
+                matureForecast: Math.round(sumMature),
+                newForecast: Math.round(sumNew)
+            };
+
+            forecastData.push(point);
+            allPoints.push(point); // Add to running list for next iteration's lookback
+            
+            monthlyFs.push({ date: label, val: Math.round(sum), yoy });
         }
 
-        // --- 2. Portfolio Analysis (K-Means) ---
+        // --- 2. Segmented Data (Combined) ---
+        const combinedSegmented = [...histData, ...forecastData];
+
+        // --- 3. Growth Rate Calculation (YoY) for Segments ---
+        const growthRates = combinedSegmented.map((curr, i) => {
+            if (i < 12) return { date: curr.date, matureYoY: null, newYoY: null, totalYoY: null };
+            
+            const prev = combinedSegmented[i - 12];
+            
+            const currMature = curr.actual !== null ? curr.matureActual! : curr.matureForecast!;
+            const prevMature = prev.actual !== null ? prev.matureActual! : prev.matureForecast!;
+            
+            const currNew = curr.actual !== null ? curr.newActual! : curr.newForecast!;
+            const prevNew = prev.actual !== null ? prev.newActual! : prev.newForecast!;
+
+            const currTotal = curr.actual !== null ? curr.actual! : curr.forecast!;
+            const prevTotal = prev.actual !== null ? prev.actual! : prev.forecast!;
+
+            return {
+                date: curr.date,
+                matureYoY: prevMature > 0 ? Number(((currMature - prevMature) / prevMature * 100).toFixed(1)) : 0,
+                newYoY: prevNew > 0 ? Number(((currNew - prevNew) / prevNew * 100).toFixed(1)) : 0,
+                totalYoY: prevTotal > 0 ? Number(((currTotal - prevTotal) / prevTotal * 100).toFixed(1)) : 0
+            };
+        }).filter((_, i) => i >= 12);
+
+
+        // --- 4. Portfolio Analysis (K-Means) ---
         let points = activeStores
             .filter(s => s.fit.mode !== 'startup') // Exclude startups
             .map(s => ({
@@ -93,7 +191,7 @@ const DashboardView: React.FC<DashboardViewProps> = ({ allStores, forecastMonths
             
             // Focus on 70th Percentile (Exclude top 30% outliers for density)
             const idx5 = Math.floor(points.length * 0.05);
-            const idx70 = Math.floor(points.length * 0.80);
+            const idx70 = Math.floor(points.length * 0.70);
             
             let coreMinX = sortedXVals[idx5] !== undefined ? sortedXVals[idx5] : absMinX;
             let coreMaxX = sortedXVals[idx70] !== undefined ? sortedXVals[idx70] : absMaxX;
@@ -155,7 +253,7 @@ const DashboardView: React.FC<DashboardViewProps> = ({ allStores, forecastMonths
 
         const bubbles: BubblePoint[] = points.map(p => ({ x: p.x, y: p.y, z: p.z, name: p.name, cluster: p.cluster }));
 
-        // --- 3. Vintage Analysis (Normalized) ---
+        // --- 5. Vintage Analysis (Normalized) ---
         const cohorts: { [key: string]: { s: number[], c: number[] } } = {};
         let maxL = 0;
         stores.forEach(s => {
@@ -182,7 +280,7 @@ const DashboardView: React.FC<DashboardViewProps> = ({ allStores, forecastMonths
             return pt;
         });
 
-        // --- 4. Stacked Area Chart (Historical Absolute) ---
+        // --- 6. Stacked Area Chart (Historical Absolute) ---
         const vintageMap: Record<string, StoreData[]> = {};
         const vSet = new Set<string>();
         
@@ -222,7 +320,9 @@ const DashboardView: React.FC<DashboardViewProps> = ({ allStores, forecastMonths
             stackedAreaData: areaData,
             allCohorts: sortedCohorts,
             monthlyForecasts: monthlyFs,
-            axisDomains: { x: xDomain, y: yDomain }
+            axisDomains: { x: xDomain, y: yDomain },
+            segmentedData: combinedSegmented,
+            growthRateData: growthRates
         };
     }, [stores, forecastMonths, activeStores]);
 
@@ -292,6 +392,48 @@ const DashboardView: React.FC<DashboardViewProps> = ({ allStores, forecastMonths
             </LineChart>
         </ResponsiveContainer>
     ), [chartData]);
+
+    const renderSegmentedSalesChart = useCallback(() => (
+        <ResponsiveContainer width="100%" height="100%">
+            <AreaChart data={segmentedData} margin={{ top: 10, right: 10, bottom: 0, left: 0 }}>
+                <defs>
+                    <linearGradient id="colorMature" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%" stopColor="#005EB8" stopOpacity={0.8}/>
+                        <stop offset="95%" stopColor="#005EB8" stopOpacity={0.1}/>
+                    </linearGradient>
+                    <linearGradient id="colorNew" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%" stopColor="#F59E0B" stopOpacity={0.8}/>
+                        <stop offset="95%" stopColor="#F59E0B" stopOpacity={0.1}/>
+                    </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E2E8F0" />
+                <XAxis dataKey="date" tick={{fontSize: 9}} minTickGap={30} />
+                <YAxis tick={{fontSize: 9}} label={{ value: '売上 (千円)', angle: -90, position: 'left', offset: 0, fontSize: 9 }} />
+                <Tooltip formatter={(val: number) => val.toLocaleString() + '千円'} contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)' }} />
+                <Area type="monotone" dataKey="matureActual" stackId="1" stroke="#005EB8" fill="url(#colorMature)" name="実績 (3年以上)" />
+                <Area type="monotone" dataKey="newActual" stackId="1" stroke="#F59E0B" fill="url(#colorNew)" name="実績 (3年未満)" />
+                <Area type="monotone" dataKey="matureForecast" stackId="1" stroke="#005EB8" strokeDasharray="5 5" fill="url(#colorMature)" fillOpacity={0.5} name="予測 (3年以上)" />
+                <Area type="monotone" dataKey="newForecast" stackId="1" stroke="#F59E0B" strokeDasharray="5 5" fill="url(#colorNew)" fillOpacity={0.5} name="予測 (3年未満)" />
+                <Legend wrapperStyle={{ fontSize: '9px', paddingTop: '10px' }} iconSize={8} />
+            </AreaChart>
+        </ResponsiveContainer>
+    ), [segmentedData]);
+
+    const renderGrowthRateChart = useCallback(() => (
+        <ResponsiveContainer width="100%" height="100%">
+            <LineChart data={growthRateData} margin={{ top: 10, right: 10, bottom: 0, left: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E2E8F0" />
+                <XAxis dataKey="date" tick={{fontSize: 9}} minTickGap={30} />
+                <YAxis tick={{fontSize: 9}} unit="%" />
+                <Tooltip formatter={(val: number) => val.toFixed(1) + '%'} contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)' }} />
+                <ReferenceLine y={0} stroke="#000" />
+                <Line type="monotone" dataKey="matureYoY" stroke="#005EB8" strokeWidth={2} dot={false} name="YoY (3年以上)" />
+                <Line type="monotone" dataKey="newYoY" stroke="#F59E0B" strokeWidth={2} dot={false} name="YoY (3年未満)" />
+                <Line type="monotone" dataKey="totalYoY" stroke="#10B981" strokeWidth={1} strokeDasharray="3 3" dot={false} name="全社YoY" />
+                <Legend wrapperStyle={{ fontSize: '9px', paddingTop: '10px' }} iconSize={8} />
+            </LineChart>
+        </ResponsiveContainer>
+    ), [growthRateData]);
 
     const renderPortfolioChart = useCallback(() => (
         <ResponsiveContainer width="100%" height="100%">
@@ -424,7 +566,10 @@ const DashboardView: React.FC<DashboardViewProps> = ({ allStores, forecastMonths
                 
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-6 font-bold font-display">
                     <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6 border-l-8 border-[#005EB8]">
-                        <p className="text-[10px] text-gray-400 uppercase mb-1">稼働店舗合計予測値</p>
+                        <p className="text-[10px] text-gray-400 uppercase mb-1 flex items-center">
+                            稼働店舗合計予測値
+                            <HelpTooltip title="稼働店舗合計予測値" content="全稼働店舗の来月以降の予測売上（ロジスティックモデルによるトレンド + 季節性 + 直近補正）を合算した数値です。新規出店計画分は含まれていません。" />
+                        </p>
                         {/* totalForecast is sum of raw (1000s). So totalForecast * 1000 Yen. -> / 1000000 = HyakuMan Yen */}
                         <h3 className="text-3xl font-black text-[#005EB8]">{Math.round(totalForecast / 100).toLocaleString()}<span className="text-sm text-gray-400 ml-2">百万円</span></h3>
                     </div>
@@ -442,7 +587,22 @@ const DashboardView: React.FC<DashboardViewProps> = ({ allStores, forecastMonths
                     <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-5 h-auto flex flex-col relative group">
                         <ExpandButton target="forecast" />
                         <div className="flex justify-between items-center mb-4">
-                            <h3 className="font-black text-gray-700 text-xs uppercase tracking-widest font-display">全社推移予測 (稼働店積上 / Startup補正込)</h3>
+                            <h3 className="font-black text-gray-700 text-xs uppercase tracking-widest font-display flex items-center">
+                                全社推移予測 (稼働店積上)
+                                <HelpTooltip 
+                                    title="全社推移予測チャート" 
+                                    content={
+                                        <>
+                                            <p>過去の実績（黒線）と将来の予測（青い点線）を表示します。</p>
+                                            <p className="mt-2 font-bold text-slate-700">見るべきポイント:</p>
+                                            <ul className="list-disc pl-4 mt-1">
+                                                <li>青い点線が右肩上がりなら、既存店ベースで成長が続いています。</li>
+                                                <li>黒点（実績）が青線より下振れしている場合、全社的な不調のサインです。</li>
+                                            </ul>
+                                        </>
+                                    } 
+                                />
+                            </h3>
                             <button onClick={() => setShowForecastTable(!showForecastTable)} className="text-xs text-[#005EB8] font-bold hover:underline">
                                 {showForecastTable ? "テーブルを隠す" : "詳細テーブルを表示"}
                             </button>
@@ -455,6 +615,7 @@ const DashboardView: React.FC<DashboardViewProps> = ({ allStores, forecastMonths
                                 <table className="min-w-full text-xs text-center">
                                     <thead>
                                         <tr>
+                                            <th className="px-2 py-1 font-black text-gray-500 bg-gray-50 border-r border-white whitespace-nowrap text-left">Metrics</th>
                                             {monthlyForecasts.slice(0, 12).map(d => (
                                                 <th key={d.date} className="px-2 py-1 font-black text-gray-500 bg-gray-50 border-r border-white whitespace-nowrap">{d.date.split('-')[1]}月</th>
                                             ))}
@@ -462,8 +623,17 @@ const DashboardView: React.FC<DashboardViewProps> = ({ allStores, forecastMonths
                                     </thead>
                                     <tbody>
                                         <tr>
+                                            <td className="px-2 py-2 font-bold text-gray-600 border-r border-gray-100 text-left whitespace-nowrap">予測売上</td>
                                             {monthlyForecasts.slice(0, 12).map(d => (
                                                 <td key={d.date} className="px-2 py-2 font-bold text-[#005EB8] border-r border-gray-100">{d.val.toLocaleString()}<span className="text-[9px] text-gray-400 ml-0.5">k</span></td>
+                                            ))}
+                                        </tr>
+                                        <tr>
+                                            <td className="px-2 py-2 font-bold text-gray-600 border-r border-gray-100 text-left whitespace-nowrap">前年比(YoY)</td>
+                                            {monthlyForecasts.slice(0, 12).map(d => (
+                                                <td key={d.date} className={`px-2 py-2 font-bold border-r border-gray-100 ${d.yoy >= 0 ? 'text-green-500' : 'text-red-500'}`}>
+                                                    {(d.yoy * 100).toFixed(1)}%
+                                                </td>
                                             ))}
                                         </tr>
                                     </tbody>
@@ -475,7 +645,23 @@ const DashboardView: React.FC<DashboardViewProps> = ({ allStores, forecastMonths
                         <ExpandButton target="portfolio" />
                         <div className="flex justify-between items-start mb-4">
                              <div>
-                                <h3 className="font-black text-gray-700 text-xs uppercase tracking-widest font-display">ポートフォリオ分析 (K-Means Clustering)</h3>
+                                <h3 className="font-black text-gray-700 text-xs uppercase tracking-widest font-display flex items-center">
+                                    ポートフォリオ分析 (4象限マップ)
+                                    <HelpTooltip 
+                                        title="ポートフォリオ分析 (PPM)" 
+                                        content={
+                                            <>
+                                                <p>全店舗を「成長速度(k)」と「規模ポテンシャル(L)」で4つに分類します。</p>
+                                                <ul className="mt-2 space-y-1">
+                                                    <li><span className="text-orange-500 font-bold">Star (右上):</span> 高成長・大規模。最優先投資対象。</li>
+                                                    <li><span className="text-blue-500 font-bold">Cash Cow (左上):</span> 安定・大規模。利益の源泉。</li>
+                                                    <li><span className="text-purple-500 font-bold">Question (右下):</span> 高成長だが小規模。化ける可能性あり。</li>
+                                                    <li><span className="text-gray-500 font-bold">Dog (左下):</span> 低成長・小規模。撤退検討領域。</li>
+                                                </ul>
+                                            </>
+                                        } 
+                                    />
+                                </h3>
                              </div>
                         </div>
                         <div className="flex-1 w-full relative">
@@ -487,10 +673,45 @@ const DashboardView: React.FC<DashboardViewProps> = ({ allStores, forecastMonths
                     </div>
                 </div>
 
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                    <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-5 h-[360px] flex flex-col relative group">
+                        <ExpandButton target="segmentedSales" />
+                        <h3 className="font-black text-gray-700 text-xs uppercase tracking-widest mb-4 font-display flex items-center">
+                            既存店(3年以上) vs 新店 売上推移比較
+                            <HelpTooltip 
+                                title="セグメント別売上推移" 
+                                content="全社売上を「オープン3年以上の既存店（青）」と「3年未満の新店（オレンジ）」に分けて表示します。新店効果で全体の数字が良く見えているだけではないか？を確認するために使います。" 
+                            />
+                        </h3>
+                        <div className="h-full pb-8">
+                            {renderSegmentedSalesChart()}
+                        </div>
+                    </div>
+                    <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-5 h-[360px] flex flex-col relative group">
+                        <ExpandButton target="segmentedGrowth" />
+                        <h3 className="font-black text-gray-700 text-xs uppercase tracking-widest mb-4 font-display flex items-center">
+                            属性別 成長率(YoY)推移
+                            <HelpTooltip 
+                                title="属性別成長率 (YoY)" 
+                                content="既存店と新店それぞれの昨対比成長率です。青線（既存店）が100%（0ライン）を割っている場合、構造的な顧客離れが起きている危険信号です。" 
+                            />
+                        </h3>
+                        <div className="h-full pb-8">
+                            {renderGrowthRateChart()}
+                        </div>
+                    </div>
+                </div>
+
                 <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-5 h-auto min-h-[500px] flex flex-col relative group">
                     <ExpandButton target="stacked" />
                     <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 gap-4">
-                        <h3 className="font-black text-gray-700 text-xs uppercase tracking-widest font-display whitespace-nowrap">全社売上 積上構成 (創業ビンテージ別・山グラフ)</h3>
+                        <h3 className="font-black text-gray-700 text-xs uppercase tracking-widest font-display whitespace-nowrap flex items-center">
+                            全社売上 積上構成 (創業ビンテージ別)
+                            <HelpTooltip 
+                                title="Vintage別積上グラフ" 
+                                content="オープン時期（年代）ごとに売上を色分けして積み上げたグラフです。「昔オープンした層（下の層）」が細くなっていないか（既存店の衰退）をチェックします。" 
+                            />
+                        </h3>
                         <div className="flex flex-wrap gap-2 max-w-full justify-end pr-8">
                             {allCohorts.map((cohort, i) => {
                                 const isDisabled = disabledCohorts.includes(cohort);
@@ -516,7 +737,19 @@ const DashboardView: React.FC<DashboardViewProps> = ({ allStores, forecastMonths
 
                 <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-5 h-auto flex flex-col font-bold relative group">
                     <ExpandButton target="vintage" />
-                    <h3 className="font-black text-gray-700 text-xs uppercase tracking-widest mb-4 font-display">Vintage分析 (5年開業組 / 正規化推移)</h3>
+                    <h3 className="font-black text-gray-700 text-xs uppercase tracking-widest mb-4 font-display flex items-center">
+                        Vintage分析 (5年開業組 / 正規化推移)
+                        <HelpTooltip 
+                            title="Vintage分析 (エイジング)" 
+                            content={
+                                <>
+                                    <p>オープン時期（世代）ごとに、経過月数ごとの平均売上を比較したものです。</p>
+                                    <p className="mt-2 font-bold text-slate-700">解釈:</p>
+                                    <p>新しい世代の線（明るい色）が古い世代（暗い色）より上にきていれば、出店戦略は成功しています（初速が良くなっている）。逆なら、立地選定の質が落ちている可能性があります。</p>
+                                </>
+                            } 
+                        />
+                    </h3>
                     <div className="h-[350px] w-full relative">
                         {renderVintageChart()}
                     </div>
@@ -532,6 +765,8 @@ const DashboardView: React.FC<DashboardViewProps> = ({ allStores, forecastMonths
                             {expandedChart === 'portfolio' && 'ポートフォリオ分析 詳細'}
                             {expandedChart === 'stacked' && '全社売上 積上構成 詳細'}
                             {expandedChart === 'vintage' && 'Vintage分析 詳細'}
+                            {expandedChart === 'segmentedSales' && '既存店 vs 新店 売上比較 詳細'}
+                            {expandedChart === 'segmentedGrowth' && '属性別 成長率(YoY)推移 詳細'}
                         </h2>
                         <button 
                             onClick={() => setExpandedChart(null)}
@@ -545,6 +780,8 @@ const DashboardView: React.FC<DashboardViewProps> = ({ allStores, forecastMonths
                         {expandedChart === 'portfolio' && renderPortfolioChart()}
                         {expandedChart === 'stacked' && renderStackedAreaChart()}
                         {expandedChart === 'vintage' && renderVintageChart()}
+                        {expandedChart === 'segmentedSales' && renderSegmentedSalesChart()}
+                        {expandedChart === 'segmentedGrowth' && renderGrowthRateChart()}
                     </div>
                 </div>
             )}
