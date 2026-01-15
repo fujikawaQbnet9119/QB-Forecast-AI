@@ -541,7 +541,25 @@ const AnalyticsView: React.FC<AnalyticsViewProps> = ({ allStores }) => {
         }));
 
         // Young Stores Trajectories
-        const youngStores = stores.filter(s => s.raw.length >= 3 && s.raw.length <= 24);
+        // MODIFIED: Filter out relocated stores (high initial sales) and extreme outliers
+        const youngStores = stores.filter(s => {
+            const isYoung = s.raw.length >= 3 && s.raw.length <= 24;
+            if (!isYoung) return false;
+
+            // 1. Relocation Filter: Initial month sales > 60% of Potential(L)
+            // Startup stores usually start at 10-30%. If >60%, it's likely a relocation with existing customers.
+            const initialRatio = s.params.L > 0 ? (s.raw[0] / s.params.L) : 0;
+            if (initialRatio > 0.6) return false;
+
+            // 2. Outlier Filter: Any month sales > 150% of Potential(L)
+            // Indicates extreme anomaly or bad L estimation.
+            const maxVal = Math.max(...s.raw);
+            const maxRatio = s.params.L > 0 ? (maxVal / s.params.L) : 0;
+            if (maxRatio > 1.5) return false;
+
+            return true;
+        });
+
         const trajectories = youngStores.slice(0, 20).map(s => { 
             const points = s.raw.map((val, i) => ({
                 month: i,
@@ -612,6 +630,20 @@ const AnalyticsView: React.FC<AnalyticsViewProps> = ({ allStores }) => {
             count: c
         }));
     }, [stores]);
+
+    // 8-D: Standard Model Chart Data (Reference)
+    const standardModelReference = useMemo(() => {
+        const k = growthAnalysis.standardK;
+        const t0 = Math.log(9) / k; // Assumes 10% start capacity
+        const data = [];
+        for(let t=0; t<=60; t++) {
+            data.push({
+                t: t,
+                y: (1 / (1 + Math.exp(-k * (t - t0)))) * 100
+            });
+        }
+        return { k, data };
+    }, [growthAnalysis.standardK]);
 
 
     const tabClass = (tab: string) => `px-6 py-3 rounded-full text-xs font-black transition-all font-display ${activeTab === tab ? 'bg-[#005EB8] text-white shadow-lg shadow-blue-200 transform scale-105' : 'bg-white text-gray-400 hover:bg-gray-50'}`;
@@ -1243,7 +1275,7 @@ const AnalyticsView: React.FC<AnalyticsViewProps> = ({ allStores }) => {
                                 <ExpandButton target="lifecycle" />
                                 <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display flex items-center">
                                     ライフサイクル分析 (Age vs Sales)
-                                    <HelpTooltip title="ライフサイクル分析" content="横軸に店舗年齢、縦軸に売上をとったグラフです。右に行く（古くなる）につれて売上が下がっている場合、店舗の老朽化・陳腐化が進んでいます。" />
+                                    <HelpTooltip title="ライフサイクル分析" content="横軸に店舗年齢、縦軸に売上をとったグラフです。右に行く（古くなる）につれて売上が下がっている場合、店舗の老朽化（陳腐化）が進んでいます。" />
                                 </h3>
                                 <div className="h-full pb-8">
                                     {renderChart('lifecycle')}
@@ -1484,6 +1516,54 @@ const AnalyticsView: React.FC<AnalyticsViewProps> = ({ allStores }) => {
                     {/* --- GROWTH TAB (NEW) --- */}
                     {activeTab === 'growth' && (
                         <>
+                            {/* Standard Model Reference Card */}
+                            <div className="md:col-span-2 bg-white rounded-3xl p-8 shadow-sm border border-gray-100 mb-6 flex flex-col md:flex-row gap-8 items-center">
+                                <div className="flex-1 space-y-6">
+                                    <div>
+                                        <h3 className="text-xl font-black text-gray-800 uppercase tracking-tight mb-2 font-display border-l-4 border-[#005EB8] pl-4">
+                                            標準成長モデル (Standard Model)
+                                        </h3>
+                                        <p className="text-sm text-gray-500 font-medium leading-relaxed">
+                                            全店舗の統計解析から導出された、当社における「理想的な成長軌道」です。<br/>
+                                            新規出店や不振店のリハビリ計画は、このカーブを基準（ベースライン）として策定されます。
+                                        </p>
+                                    </div>
+                                    
+                                    {/* Math Formula Display */}
+                                    <div className="bg-slate-50 rounded-xl p-6 border border-slate-200 text-center relative overflow-hidden">
+                                        <div className="absolute top-0 left-0 bg-slate-200 text-slate-500 text-[9px] font-bold px-2 py-1 rounded-br-lg">FORMULA</div>
+                                        <div className="font-serif text-2xl md:text-3xl text-slate-700 italic my-2">
+                                            y(t) = <span className="inline-block align-middle text-center"><span className="block border-b border-slate-400 pb-1 mb-1">L</span><span className="block">1 + e<sup className="text-sm">-k(t - t₀)</sup></span></span>
+                                        </div>
+                                        <div className="mt-4 flex justify-center gap-8 text-xs font-bold text-slate-500 font-mono">
+                                            <div>
+                                                <span className="text-orange-500 block text-lg">k = {growthAnalysis.standardK.toFixed(3)}</span>
+                                                <span>Standard Growth Rate</span>
+                                            </div>
+                                            <div>
+                                                <span className="text-[#005EB8] block text-lg">L = 100%</span>
+                                                <span>Potential Capacity</span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div className="flex-1 w-full h-[300px] bg-slate-50 rounded-2xl p-4 border border-slate-200 relative">
+                                    <div className="absolute top-3 left-4 text-xs font-black text-gray-400 uppercase tracking-widest z-10">Standard Curve Visualization (5 Year)</div>
+                                    <ResponsiveContainer width="100%" height="100%">
+                                        <LineChart data={standardModelReference.data} margin={{ top: 20, right: 20, bottom: 0, left: 0 }}>
+                                            <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                                            <XAxis dataKey="t" tick={{fontSize:9}} label={{ value: '経過月数 (t)', position: 'bottom', offset: 0, fontSize: 9 }} type="number" domain={[0, 60]} />
+                                            <YAxis tick={{fontSize:9}} unit="%" domain={[0, 100]} />
+                                            <Tooltip formatter={(val: number) => val.toFixed(1) + '%'} contentStyle={{borderRadius:'12px', border:'none', boxShadow:'0 10px 15px -3px rgba(0,0,0,0.1)'}} />
+                                            <ReferenceLine y={50} stroke="#cbd5e1" strokeDasharray="3 3" label={{ value: '50% (Inflection)', position: 'insideTopLeft', fontSize: 9, fill:'#94a3b8' }} />
+                                            <ReferenceLine y={95} stroke="#cbd5e1" strokeDasharray="3 3" label={{ value: '95% (Saturation)', position: 'insideBottomLeft', fontSize: 9, fill:'#94a3b8' }} />
+                                            <Line type="monotone" dataKey="y" stroke="#005EB8" strokeWidth={3} dot={false} activeDot={{r: 6}} name="達成率" />
+                                        </LineChart>
+                                    </ResponsiveContainer>
+                                </div>
+                            </div>
+
                             {/* Aging Curve (NEW) */}
                             <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-100 h-[360px] relative group">
                                 <ExpandButton target="aging" />
@@ -1557,7 +1637,7 @@ const AnalyticsView: React.FC<AnalyticsViewProps> = ({ allStores }) => {
                                 <ExpandButton target="newStore" />
                                 <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display flex items-center">
                                     新規店 初動軌跡比較 (Actual vs Standard Model)
-                                    <HelpTooltip title="新規店 初動比較" content="最近オープンした店舗の成長カーブを、全社標準モデル（点線）と比較します。実線が点線より上にあれば、その新店は「優等生」です。" />
+                                    <HelpTooltip title="新規店 初動比較" content="最近オープンした店舗の成長カーブを、全社標準モデル（点線）と比較します。※移転やリニューアルによる初月高売上店（Lの60%超）や、極端な異常値を持つ店舗は除外しています。" />
                                 </h3>
                                 <div className="h-full pb-8">
                                     {renderChart('newStore')}

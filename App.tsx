@@ -9,10 +9,11 @@ import ModelLogicView from './components/ModelLogicView';
 import GuideView from './components/GuideView';
 import ComparisonView from './components/ComparisonView';
 import StoreTableView from './components/StoreTableView';
+import ModelValidationView from './components/ModelValidationView';
 import { StoreData } from './types';
 
 const App: React.FC = () => {
-    const [currentView, setCurrentView] = useState<'data' | 'dashboard' | 'analytics' | 'bench' | 'store' | 'table' | 'logic' | 'guide'>('data');
+    const [currentView, setCurrentView] = useState<'data' | 'dashboard' | 'analytics' | 'bench' | 'store' | 'table' | 'logic' | 'guide' | 'validate'>('data');
     const [allStores, setAllStores] = useState<{ [name: string]: StoreData }>({});
     const [globalMaxDate, setGlobalMaxDate] = useState<Date>(new Date());
     const [forecastMonths, setForecastMonths] = useState(36);
@@ -72,6 +73,11 @@ const App: React.FC = () => {
                 )}
                 {currentView === 'table' && (
                     <StoreTableView 
+                        allStores={allStores}
+                    />
+                )}
+                {currentView === 'validate' && (
+                    <ModelValidationView 
                         allStores={allStores}
                     />
                 )}

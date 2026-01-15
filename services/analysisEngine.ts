@@ -53,8 +53,12 @@ export const calculatePearsonCorrelation = (x: number[], y: number[]) => {
 // --- New Advanced Stats Helpers ---
 
 export const calculateAdvancedStats = (store: StoreData): StoreData => {
+    // Stats should reflect valid data behavior mostly, but total sales includes everything
+    // For robust stats (like trend), we usually prefer masked data, but for total volume, we use raw.
     const validData = store.raw.filter((_, i) => store.mask[i]);
-    if (validData.length === 0) return store;
+    const allData = store.raw; // Use all data for totals
+    
+    if (allData.length === 0) return store;
 
     // 1. Basic Sums for ABC / YoY
     const len = store.raw.length;
@@ -72,7 +76,7 @@ export const calculateAdvancedStats = (store: StoreData): StoreData => {
         }
     }
 
-    // 3. CV (Coefficient of Variation) & Skewness
+    // 3. CV (Coefficient of Variation) & Skewness - Using Valid Data to avoid skewing by outliers
     const mean = validData.reduce((a, b) => a + b, 0) / validData.length;
     const variance = validData.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / validData.length;
     const std = Math.sqrt(variance);
@@ -83,7 +87,7 @@ export const calculateAdvancedStats = (store: StoreData): StoreData => {
     // 4. Z-Chart Data (Monthly, Cumulative, Moving Annual Total)
     const zChart = [];
     let cum = 0;
-    // Calculate for FULL history to ensure alignment with dates in views
+    // Calculate for FULL history
     for (let i = 0; i < len; i++) {
         const mVal = store.raw[i];
         cum += mVal;
@@ -100,12 +104,12 @@ export const calculateAdvancedStats = (store: StoreData): StoreData => {
     return {
         ...store,
         stats: {
-            totalSales: validData.reduce((a, b) => a + b, 0),
+            totalSales: allData.reduce((a, b) => a + b, 0),
             lastYearSales: last12,
             prevYearSales: prev12,
             yoy,
             cagr,
-            abcRank: 'C', // Placeholder, calculated globally later
+            abcRank: 'C', 
             skewness,
             cv,
             zChart
@@ -132,7 +136,13 @@ export const calculateGlobalABC = (stores: StoreData[]) => {
 // --- Model Logic ---
 
 export const logisticModel = (t: number, p: any, mode: string, tShock: number): number => {
-    // Startup mode now uses the standard logistic formula but with constrained k
+    // Startup Mode: Baseline + Growth Model
+    // y(t) = Base + (L_growth / (1 + e^-k(t-t0)))
+    if (mode === 'startup' && p.base !== undefined) {
+        return p.base + (p.L / (1 + Math.exp(-p.k * (t - p.t0))));
+    }
+
+    // Standard / Shift Models
     if ((mode === 'shift' || mode === 'recovery') && t >= tShock) {
         return p.L_post / (1 + Math.exp(-p.k * (t - p.t0)));
     }
@@ -150,20 +160,29 @@ function objectiveFunction(params: number[], data: number[], mask: boolean[], co
     if (mode === 'shift' || mode === 'recovery') {
         p = { L_pre: params[0], L_post: params[1], k: params[2], t0: params[3] };
     } else if (mode === 'startup') {
-        // Constrained Optimization: k is fixed to global median
-        p = { L: params[0], k: config.fixedK, t0: params[1] };
+        p = { base: config.base, L: params[0], k: config.fixedK, t0: params[1] };
     } else {
         p = { L: params[0], k: params[1], t0: params[2] };
     }
     
     // Constraints
     if (mode !== 'startup') {
-        if (p.k < 0.001 || p.k > 5.0) return 1e15; 
+        if (p.k < 0.0001 || p.k > 5.0) return 1e15; 
+        const maxVal = config.maxVal || 0;
+        const limitL = maxVal > 0 ? maxVal * 5.0 : 1e9;
+
+        if (mode !== 'standard') {
+            if (p.L_pre < 0 || p.L_post < 0) return 1e15;
+            if (p.L_pre > limitL || p.L_post > limitL) return 1e15; 
+        } else {
+            if (p.L < 0 || p.L > limitL) return 1e15;
+        }
+    } else {
+        if (p.base + p.L < 0) return 1e15; 
     }
-    if (mode !== 'standard' && mode !== 'startup' && (p.L_pre < 0 || p.L_post < 0)) return 1e15;
-    if ((mode === 'standard' || mode === 'startup') && p.L < 0) return 1e15;
 
     for (let i = 0; i < data.length; i++) {
+        // Optimization still strictly ignores outliers to find the "True Trend"
         if (!mask[i]) continue;
         const pred = logisticModel(i, p, mode, config.shockIdx);
         const res = data[i] - pred;
@@ -256,23 +275,25 @@ export function analyzeStore(name: string, raw: number[], dates: string[], globa
     if (validCount < 12) {
         if (isActive) {
             if (globalStats && validCount >= 3) {
-                // --- STARTUP ANALYSIS WITH GLOBAL K ---
+                // --- STARTUP ANALYSIS: BASELINE + GROWTH MODEL ---
+                const validVals = raw.filter((_, i) => mask[i]);
+                const baseSales = validVals.reduce((a, b) => a + b, 0) / validVals.length;
+                
                 const fixedK = globalStats.medianK || 0.1;
-                const initL = maxVal * 1.2; // Assume some growth potential
-                const initT0 = 0; // Assume start of curve
+                const initL_growth = Math.max((maxVal - baseSales) * 2, baseSales * 0.2); 
+                const initT0 = 0; 
                 
-                // Optimize only L and t0 (2 params), with fixed K
-                const startParams = [initL, initT0];
-                const res = nelderMead(objectiveFunction, startParams, raw, mask, { mode: 'startup', fixedK });
+                const startParams = [initL_growth, initT0];
+                const res = nelderMead(objectiveFunction, startParams, raw, mask, { mode: 'startup', fixedK, base: baseSales, maxVal });
                 
-                const fitP = { L: res.p[0], k: fixedK, t0: res.p[1] };
+                const fitP = { base: baseSales, L: res.p[0], k: fixedK, t0: res.p[1] };
                 
-                // Use Global Seasonality if local data is too sparse to detect it
                 const finalSea = globalStats.medianSeasonality.length === 12 ? globalStats.medianSeasonality : Array(12).fill(1.0);
                 
                 // Decomposition
                 const comp = { t: [] as number[], s: [] as number[], r: [] as number[] };
                 const residuals: number[] = [];
+                
                 raw.forEach((v, i) => {
                     const tr = logisticModel(i, fitP, 'startup', -1);
                     const dO = new Date(dates[i].replace(/\//g, '-'));
@@ -280,25 +301,27 @@ export function analyzeStore(name: string, raw: number[], dates: string[], globa
                     const fitted = tr * s;
                     comp.t.push(tr);
                     comp.s.push(s);
-                    const r = mask[i] ? v - fitted : 0;
-                    comp.r.push(r);
-                    if(mask[i]) residuals.push(r);
+                    
+                    // CORRECTION: For Nudge calculation, we MUST include outliers (mask=false)
+                    // The prediction should start from the *actual* recent level, even if it's an anomaly.
+                    const realResidual = v - fitted;
+                    comp.r.push(realResidual);
+                    residuals.push(realResidual); // Always push to residuals used for Nudge
                 });
 
                 // --- NUDGE CALCULATION (Startup Logic) ---
-                // For young stores, we want to connect firmly to recent data.
                 let nudge = 0;
                 const resLen = residuals.length;
                 if (resLen > 0) {
                      if (resLen < 6) {
-                        // < 6 months: Use latest single point (Force connect)
                         nudge = residuals[resLen - 1];
                      } else {
-                        // 6 <= len < 12: Average of last 3 months
                         const last3 = residuals.slice(-3);
                         nudge = last3.reduce((a, b) => a + b, 0) / last3.length;
                      }
                 }
+
+                const nudgeDecay = 0.8; 
 
                 const sseFinal = residuals.reduce((s, r) => s + r*r, 0);
                 const stdDev = Math.sqrt(sseFinal / Math.max(1, residuals.length));
@@ -306,18 +329,17 @@ export function analyzeStore(name: string, raw: number[], dates: string[], globa
                 storeResult = {
                     name, raw, dates, mask, isActive: true,
                     nudge: nudge, 
-                    nudgeDecay: 1.0, // UPDATED: Parallel Shift (Launchpad Theory)
-                                     // Initial scale differences are structural potential, so we maintain the gap (Decay 1.0).
+                    nudgeDecay: nudgeDecay,
                     seasonal: finalSea,
                     components: comp,
-                    params: fitP,
+                    params: { L: fitP.base + fitP.L, k: fitP.k, t0: fitP.t0 },
                     fit: { params: fitP, mode: 'startup', shockIdx: -1, aic: 0 },
                     stdDev,
                     cv: { logistic: stdDev }
                 };
 
             } else {
-                // Fallback: Simple Average (if no global stats or very few points)
+                // Fallback: Simple Average
                 const validVals = raw.filter((_, i) => mask[i]);
                 const avg = validVals.length > 0 ? validVals.reduce((a,b)=>a+b,0)/validVals.length : 0;
                 const sea = Array(12).fill(1.0);
@@ -345,13 +367,14 @@ export function analyzeStore(name: string, raw: number[], dates: string[], globa
         if (dates[i]?.includes("2020-04") || dates[i]?.includes("2020/04")) { shockIdx = i; break; }
     }
     
-    const initL = maxVal; 
+    // Initialization with Anchoring (1.5x Max)
+    const initL = maxVal * 1.5; 
     const initK = 0.1; 
     const initT0 = raw.length / 2;
 
     // Model Selection via AIC
     const startParamsStd = [initL, initK, initT0];
-    const resStd = nelderMead(objectiveFunction, startParamsStd, raw, mask, { mode: 'standard', shockIdx });
+    const resStd = nelderMead(objectiveFunction, startParamsStd, raw, mask, { mode: 'standard', shockIdx, maxVal });
     const aicStd = calculateAIC(resStd.sse, resStd.n, 3);
 
     let bestRes = resStd;
@@ -364,7 +387,7 @@ export function analyzeStore(name: string, raw: number[], dates: string[], globa
 
     if (shockIdx !== -1 && hasPreData && hasPostData) {
         const startParamsShift = [initL, initL, initK, initT0];
-        const resShift = nelderMead(objectiveFunction, startParamsShift, raw, mask, { mode: 'shift', shockIdx });
+        const resShift = nelderMead(objectiveFunction, startParamsShift, raw, mask, { mode: 'shift', shockIdx, maxVal });
         const aicShift = calculateAIC(resShift.sse, resShift.n, 4);
 
         if (aicShift < aicStd - 2) {
@@ -414,43 +437,37 @@ export function analyzeStore(name: string, raw: number[], dates: string[], globa
         const fitted = tr * s;
         comp.t.push(tr);
         comp.s.push(s);
-        const res = mask[i] ? v - fitted : 0;
+        
+        // CORRECTION: Calculate real residual for all data points including outliers.
+        // Nudge must anchor to the actual recent performance.
+        const res = v - fitted; 
         comp.r.push(res);
-        if (mask[i]) residuals.push(res);
+        residuals.push(res);
     });
 
-    // --- NUDGE & DECAY REVISION (Logic Restoration) ---
-    // Instead of relying purely on autocorrelation for the magnitude of the nudge,
-    // we use explicit averages based on data length, as requested.
+    // --- NUDGE & DECAY REVISION ---
     
     let nudge = 0;
     const resLen = residuals.length;
     
     if (resLen > 0) {
         if (resLen < 6) {
-             // Should essentially not happen in this block (handled in startup), but for safety:
-             // < 6 months: Force connect to latest
              nudge = residuals[resLen - 1];
         } else if (resLen < 12) {
-             // 6 <= len < 12: Average of last 3 months
              const last3 = residuals.slice(-3);
              nudge = last3.reduce((a, b) => a + b, 0) / last3.length;
         } else {
-             // >= 12 months: Trimmed Mean of last 6 months (exclude min and max)
-             const last6 = residuals.slice(-6).sort((a, b) => a - b);
-             // Remove index 0 (min) and index 5 (max), average the middle 4
-             // If variance is 0, they are all equal, so just averaging is fine.
-             if (last6.length >= 3) {
-                 const trimmed = last6.slice(1, -1);
-                 nudge = trimmed.reduce((a, b) => a + b, 0) / trimmed.length;
+             // >= 12 months: Weighted Average of last 3 months
+             const last3 = residuals.slice(-3);
+             if (last3.length === 3) {
+                 // Weights: [0.2, 0.3, 0.5] -> Most recent gets 50% weight
+                 nudge = (last3[0] * 0.2) + (last3[1] * 0.3) + (last3[2] * 0.5);
              } else {
-                 nudge = last6.reduce((a, b) => a + b, 0) / last6.length;
+                 nudge = last3.reduce((a, b) => a + b, 0) / last3.length;
              }
         }
     }
 
-    // Determine Decay: We still use Autocorrelation for the *rate* of decay,
-    // but the *magnitude* (nudge) is now fixed by the logic above.
     const ac = calculateAutocorrelation(residuals.slice(-12));
     const nudgeDecay = Math.max(0, Math.min(0.9, ac));
 

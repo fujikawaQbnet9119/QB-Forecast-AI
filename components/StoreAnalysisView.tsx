@@ -59,13 +59,17 @@ const StoreAnalysisView: React.FC<StoreAnalysisViewProps> = ({ allStores, foreca
         if (!currentStore) return [];
         const d = currentStore;
         const z = confidence === 99 ? 2.58 : (confidence === 95 ? 1.96 : (confidence === 80 ? 1.28 : 0.67));
-        const data: (ChartDataPoint & { simulated?: number | null })[] = [];
+        const data: (ChartDataPoint & { simulated?: number | null; outlier?: number | null })[] = [];
 
         // Historical
         d.dates.forEach((date, i) => {
+            // FIX: Show raw data even if masked (excluded from fit).
+            // We use 'actual' for the connected line (all data).
+            // We use 'outlier' to highlight points that were excluded from the model.
             data.push({
                 date,
-                actual: d.mask[i] ? d.raw[i] : null,
+                actual: d.raw[i], // Always show the raw data
+                outlier: !d.mask[i] ? d.raw[i] : null, // Only populated if masked out
                 forecast: null,
                 range: null,
                 simulated: null
@@ -122,6 +126,7 @@ const StoreAnalysisView: React.FC<StoreAnalysisViewProps> = ({ allStores, foreca
             data.push({
                 date: label,
                 actual: null,
+                outlier: null,
                 forecast: Math.round(baseVal),
                 range: [Math.round(lower), Math.round(upper)],
                 simulated: simVal ? Math.round(simVal) : null
@@ -175,7 +180,7 @@ const StoreAnalysisView: React.FC<StoreAnalysisViewProps> = ({ allStores, foreca
         let maxVal = 0;
 
         currentStore.dates.forEach((d, i) => {
-            if(!currentStore.mask[i]) return;
+            // FIX: Use ALL data for heatmap, not just masked ones
             const dateObj = new Date(d.replace(/\//g, '-'));
             if(isNaN(dateObj.getTime())) return;
             const y = dateObj.getFullYear();
@@ -247,7 +252,10 @@ const StoreAnalysisView: React.FC<StoreAnalysisViewProps> = ({ allStores, foreca
                 {!simMode && <Area type="monotone" dataKey="range" fill="#005EB8" fillOpacity={0.1} stroke="transparent" name="信頼区間" />}
                 <Line type="monotone" dataKey="forecast" stroke="#005EB8" strokeWidth={3} strokeDasharray={simMode ? "3 3" : "0"} dot={false} name="AI予測 (Base)" strokeOpacity={simMode ? 0.5 : 1} />
                 {simMode && <Line type="monotone" dataKey="simulated" stroke="#9333EA" strokeWidth={3} dot={false} name="Simulation (24mo Adjust)" animationDuration={300} />}
+                {/* Main Data Line */}
                 <Line type="monotone" dataKey="actual" stroke="#1A1A1A" strokeWidth={2} dot={{r:2, fill:'#1A1A1A'}} name="実績" />
+                {/* Outliers - Red Dots for masked/excluded data */}
+                <Scatter dataKey="outlier" fill="#EF4444" name="外れ値 (除外)" shape="cross" />
                 <Brush dataKey="date" height={20} stroke="#cbd5e1" fill="#f8fafc" />
             </ComposedChart>
         </ResponsiveContainer>
@@ -442,7 +450,7 @@ const StoreAnalysisView: React.FC<StoreAnalysisViewProps> = ({ allStores, foreca
                                         <div><p className="text-[9px] font-black text-gray-400 uppercase mb-1 flex items-center justify-center">成長速度 (k)<HelpTooltip title="成長速度 (k)" content="店舗の立ち上がりの速さ。0.1以上が標準。低い場合は初期の認知不足の可能性があります。" /></p><p className="text-xl text-orange-500">{currentStore.params.k.toFixed(3)}</p></div>
                                         <div><p className="text-[9px] font-black text-gray-400 uppercase mb-1 flex items-center justify-center">潜在需要 (L)<HelpTooltip title="潜在需要 (L)" content="この店舗が到達できる売上の理論上の上限値（天井）。現在の売上がこれに近い場合、これ以上伸ばすには改装などが必要です。" /></p><p className="text-xl text-[#005EB8]">{Math.round(currentStore.params.L).toLocaleString()}<span className="text-xs text-gray-400 ml-1">千円</span></p></div>
                                         <div><p className="text-[9px] font-black text-gray-400 uppercase mb-1 flex items-center justify-center">残差標準偏差</p><p className="text-xl font-black text-gray-600">{Math.round(currentStore.stdDev).toLocaleString()}<span className="text-xs text-gray-400 ml-1">千円</span></p></div>
-                                        <div><p className="text-[9px] font-black text-gray-400 uppercase mb-1 flex items-center justify-center">年平均成長率<HelpTooltip title="CAGR (年平均成長率)" content="直近3年間でならした平均成長率。プラスなら長期的には成長トレンドです。" /></p><p className="text-xl font-black text-green-500">{(currentStore.stats?.cagr ? currentStore.stats.cagr * 100 : 0).toFixed(1)}%</p></div>
+                                        <div><p className="text-[9px] font-black text-gray-400 uppercase mb-1 flex items-center justify-center">年平均成長率<HelpTooltip title="CAGR (年平均成長率)" content="直近3年間でならした平均成長率。プラスなら長期的には成長トレンドにあると言えます。" /></p><p className="text-xl font-black text-green-500">{(currentStore.stats?.cagr ? currentStore.stats.cagr * 100 : 0).toFixed(1)}%</p></div>
                                     </div>
                                 </div>
                             )}
@@ -581,7 +589,7 @@ const StoreAnalysisView: React.FC<StoreAnalysisViewProps> = ({ allStores, foreca
                     </>
                 ) : (
                      <div className="flex-1 flex flex-col items-center justify-center text-gray-300 font-bold uppercase tracking-widest bg-white rounded-3xl border border-dashed border-gray-200 m-8">
-                        <svg className="w-16 h-16 mb-4 text-gray-200" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4"></path></svg>
+                        <svg className="w-16 h-16 mb-4 text-gray-200" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4"/></svg>
                         <p>左のリストから店舗を選択してください</p>
                     </div>
                 )}

@@ -2,8 +2,8 @@
 import React from 'react';
 
 interface SidebarProps {
-    currentView: 'data' | 'dashboard' | 'analytics' | 'bench' | 'store' | 'table' | 'logic' | 'guide';
-    setCurrentView: (view: 'data' | 'dashboard' | 'analytics' | 'bench' | 'store' | 'table' | 'logic' | 'guide') => void;
+    currentView: 'data' | 'dashboard' | 'analytics' | 'bench' | 'store' | 'table' | 'logic' | 'guide' | 'validate';
+    setCurrentView: (view: 'data' | 'dashboard' | 'analytics' | 'bench' | 'store' | 'table' | 'logic' | 'guide' | 'validate') => void;
     isOpen: boolean;
     setIsOpen: (isOpen: boolean) => void;
 }
@@ -79,6 +79,13 @@ const Sidebar: React.FC<SidebarProps> = ({ currentView, setCurrentView, isOpen, 
                     <span>店舗詳細分析</span>
                 </div>
                 <div 
+                    className={`nav-item flex items-center gap-3 px-4 py-3 rounded-lg font-bold cursor-pointer transition-colors ${currentView === 'validate' ? 'bg-blue-50 text-[#005EB8]' : 'text-slate-500 hover:bg-slate-50 hover:text-[#005EB8]'}`}
+                    onClick={() => setCurrentView('validate')}
+                >
+                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"></path></svg>
+                    <span>モデル精度検証</span>
+                </div>
+                <div 
                     className={`nav-item flex items-center gap-3 px-4 py-3 rounded-lg font-bold cursor-pointer transition-colors ${currentView === 'logic' ? 'bg-blue-50 text-[#005EB8]' : 'text-slate-500 hover:bg-slate-50 hover:text-[#005EB8]'}`}
                     onClick={() => setCurrentView('logic')}
                 >
@@ -86,7 +93,7 @@ const Sidebar: React.FC<SidebarProps> = ({ currentView, setCurrentView, isOpen, 
                     <span>予測モデル仕様書</span>
                 </div>
             </nav>
-            <div className="p-4 border-t text-[10px] text-gray-400 text-center uppercase font-black font-display min-w-[260px]">v10.8 Context Help</div>
+            <div className="p-4 border-t text-[10px] text-gray-400 text-center uppercase font-black font-display min-w-[260px]">v10.9 Context Help</div>
         </aside>
     );
 };

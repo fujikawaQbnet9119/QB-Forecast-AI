@@ -1,3 +1,4 @@
+
 import React, { useState, useMemo, useEffect } from 'react';
 import { StoreData } from '../types';
 import HelpTooltip from './HelpTooltip';
@@ -32,7 +33,7 @@ const StoreTableView: React.FC<StoreTableViewProps> = ({ allStores }) => {
     // 0. Pre-calculate All Unique Dates (Sorted)
     const allUniqueDates = useMemo(() => {
         const allDatesSet = new Set<string>();
-        Object.values(allStores).forEach(s => s.dates.forEach(d => allDatesSet.add(d)));
+        Object.values(allStores).forEach((s: StoreData) => s.dates.forEach(d => allDatesSet.add(d)));
         return Array.from(allDatesSet).sort((a, b) => {
             return new Date(a.replace(/\//g, '-')).getTime() - new Date(b.replace(/\//g, '-')).getTime();
         });
@@ -50,7 +51,7 @@ const StoreTableView: React.FC<StoreTableViewProps> = ({ allStores }) => {
     
     // 1. Base Data Construction (Calculated Fields)
     const baseData = useMemo(() => {
-        return Object.values(allStores).map(s => {
+        return Object.values(allStores).map((s: StoreData) => {
             const latestSales = s.raw.length > 0 ? s.raw[s.raw.length - 1] : 0;
             const age = s.raw.length;
             return {
