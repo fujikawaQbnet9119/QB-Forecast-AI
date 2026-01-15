@@ -52,7 +52,10 @@ const ComparisonView: React.FC<ComparisonViewProps> = ({ allStores }) => {
                     }
                 }
             });
-            const dates = Array.from(dateSet).sort();
+            // Fix: Sort chronologically using Date objects
+            const dates = Array.from(dateSet).sort((a, b) => {
+                return new Date(a.replace(/\//g, '-')).getTime() - new Date(b.replace(/\//g, '-')).getTime();
+            });
             
             return dates.map(d => {
                 const pt: any = { date: d };

@@ -127,11 +127,13 @@ const DataView: React.FC<DataViewProps> = ({ setAllStores, setGlobalMaxDate, for
             const globalSeasonality: number[][] = Array.from({length:12}, () => []);
 
             if (matureStores.length > 0) {
-                // Median K
+                // Growth Rate (k): Use 75th Percentile instead of Median
+                // New stores tend to have higher initial growth velocity
                 const ks = matureStores.map(s => s.params.k).sort((a,b) => a-b);
-                globalK = ks[Math.floor(ks.length / 2)];
+                const idx75 = Math.min(ks.length - 1, Math.floor(ks.length * 0.75));
+                globalK = ks[idx75];
                 
-                // Median Seasonality
+                // Seasonality
                 matureStores.forEach(s => {
                    s.seasonal.forEach((val, monthIdx) => {
                        globalSeasonality[monthIdx].push(val);
@@ -139,11 +141,19 @@ const DataView: React.FC<DataViewProps> = ({ setAllStores, setGlobalMaxDate, for
                 });
             }
 
-            const finalGlobalSeasonality = globalSeasonality.map(arr => {
+            // Seasonality: Use 75th Percentile to capture stronger seasonal trends
+            let finalGlobalSeasonality = globalSeasonality.map(arr => {
                 if (arr.length === 0) return 1.0;
                 arr.sort((a,b) => a-b);
-                return arr[Math.floor(arr.length/2)];
+                const idx75 = Math.min(arr.length - 1, Math.floor(arr.length * 0.75));
+                return arr[idx75];
             });
+            
+            // Normalize Seasonality to average 1.0
+            const seaSum = finalGlobalSeasonality.reduce((a, b) => a + b, 0);
+            if (seaSum > 0) {
+                finalGlobalSeasonality = finalGlobalSeasonality.map(v => (v / seaSum) * 12);
+            }
             
             const globalStats: GlobalStats = {
                 medianK: globalK > 0 ? globalK : 0.1,
@@ -203,7 +213,7 @@ const DataView: React.FC<DataViewProps> = ({ setAllStores, setGlobalMaxDate, for
                             {fileContent ? `読込成功: ${fileName}` : 'CSVファイルをここにドロップ、またはクリック'}
                         </p>
                         <p className="text-xs text-gray-400 uppercase tracking-widest font-bold font-display">
-                            {fileContent ? `${lineCount} 行のデータを検出しました` : '店舗名, 年月 (YYYY/MM), 客数実績'}
+                            {fileContent ? `${lineCount} 行のデータを検出しました` : '店舗名, 年月 (YYYY/MM), 売上実績 (千円単位)'}
                         </p>
                         <div className="mt-8 flex justify-center gap-8 text-xs text-gray-500 font-bold uppercase" onClick={(e) => e.stopPropagation()}>
                             <label className="flex items-center gap-2 cursor-pointer">

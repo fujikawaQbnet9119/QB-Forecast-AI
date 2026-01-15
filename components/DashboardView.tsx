@@ -29,7 +29,10 @@ const DashboardView: React.FC<DashboardViewProps> = ({ allStores, forecastMonths
         // --- 1. Total Forecast Chart Data ---
         const dSet = new Set<string>();
         stores.forEach(s => s.dates.forEach(d => dSet.add(d)));
-        const dates = Array.from(dSet).sort();
+        // Fix: Sort dates chronologically using Date objects instead of string comparison
+        const dates = Array.from(dSet).sort((a, b) => {
+            return new Date(a.replace(/\//g, '-')).getTime() - new Date(b.replace(/\//g, '-')).getTime();
+        });
         
         const histData = dates.map(d => {
             const sum = stores.reduce((acc, s) => {
@@ -88,21 +91,23 @@ const DashboardView: React.FC<DashboardViewProps> = ({ allStores, forecastMonths
             const sortedXVals = points.map(p => p.x).sort((a, b) => a - b);
             const sortedYVals = points.map(p => p.y).sort((a, b) => a - b);
             
+            // Focus on 70th Percentile (Exclude top 30% outliers for density)
             const idx5 = Math.floor(points.length * 0.05);
-            const idx95 = Math.floor(points.length * 0.95);
+            const idx70 = Math.floor(points.length * 0.80);
             
             let coreMinX = sortedXVals[idx5] !== undefined ? sortedXVals[idx5] : absMinX;
-            let coreMaxX = sortedXVals[idx95] !== undefined ? sortedXVals[idx95] : absMaxX;
+            let coreMaxX = sortedXVals[idx70] !== undefined ? sortedXVals[idx70] : absMaxX;
             let coreMinY = sortedYVals[idx5] !== undefined ? sortedYVals[idx5] : absMinY;
-            let coreMaxY = sortedYVals[idx95] !== undefined ? sortedYVals[idx95] : absMaxY;
+            let coreMaxY = sortedYVals[idx70] !== undefined ? sortedYVals[idx70] : absMaxY;
 
             if (coreMaxX <= coreMinX) { coreMinX = absMinX; coreMaxX = absMaxX; }
             if (coreMaxY <= coreMinY) { coreMinY = absMinY; coreMaxY = absMaxY; }
             
-            const paddingX = (coreMaxX - coreMinX) * 0.1 || 0.05;
-            const paddingY = (coreMaxY - coreMinY) * 0.1 || 1000;
+            const paddingX = (coreMaxX - coreMinX) * 0.05;
+            const paddingY = (coreMaxY - coreMinY) * 0.05;
             
-            xDomain = [Math.max(0, coreMinX - paddingX), coreMaxX + paddingX];
+            // Explicitly force X and Y to 70th percentile range
+            xDomain = [0, coreMaxX + paddingX];
             yDomain = [Math.max(0, coreMinY - paddingY), coreMaxY + paddingY];
 
             const rangeX = absMaxX - absMinX || 1;
@@ -160,7 +165,7 @@ const DashboardView: React.FC<DashboardViewProps> = ({ allStores, forecastMonths
             if (!cohorts[key]) cohorts[key] = { s: [], c: [] };
             
             s.raw.forEach((v, i) => {
-                if (s.mask[i]) {
+                if (v > 0) {
                     if (cohorts[key].s[i] === undefined) { cohorts[key].s[i] = 0; cohorts[key].c[i] = 0; }
                     cohorts[key].s[i] += v;
                     cohorts[key].c[i]++;
@@ -200,7 +205,7 @@ const DashboardView: React.FC<DashboardViewProps> = ({ allStores, forecastMonths
                 let sum = 0;
                 vintageMap[c].forEach(s => {
                     const idx = s.dates.indexOf(date);
-                    if(idx !== -1 && s.mask[idx]) sum += s.raw[idx];
+                    if(idx !== -1) sum += (s.raw[idx] || 0);
                 });
                 p[c] = Math.round(sum);
             });
@@ -225,7 +230,9 @@ const DashboardView: React.FC<DashboardViewProps> = ({ allStores, forecastMonths
         if (stores.length === 0) return;
         const dSet = new Set<string>();
         stores.forEach(s => s.dates.forEach(d => dSet.add(d)));
-        const dates = Array.from(dSet).sort();
+        const dates = Array.from(dSet).sort((a, b) => {
+            return new Date(a.replace(/\//g, '-')).getTime() - new Date(b.replace(/\//g, '-')).getTime();
+        });
         const lastD = new Date(dates[dates.length - 1].replace(/\//g, '-'));
         
         const forecastHeaders: string[] = [];
@@ -276,8 +283,8 @@ const DashboardView: React.FC<DashboardViewProps> = ({ allStores, forecastMonths
             <LineChart data={chartData} margin={{ top: 10, right: 10, bottom: 0, left: 0 }}>
                 <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E2E8F0" />
                 <XAxis dataKey="date" tick={{fontSize: 9}} tickMargin={10} minTickGap={30} />
-                <YAxis tick={{fontSize: 9}} />
-                <Tooltip formatter={(val: number) => val.toLocaleString()} contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)' }} />
+                <YAxis tick={{fontSize: 9}} label={{ value: '売上 (千円)', angle: -90, position: 'left', offset: 0, fontSize: 9 }} />
+                <Tooltip formatter={(val: number) => val.toLocaleString() + '千円'} contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)' }} />
                 <Line type="monotone" dataKey="actual" name="実績" stroke="#1A1A1A" strokeWidth={2} dot={false} isAnimationActive={false} />
                 <Line type="monotone" dataKey="forecast" name="予測" stroke="#005EB8" strokeWidth={2} strokeDasharray="5 5" dot={false} />
                 <Brush dataKey="date" height={20} stroke="#cbd5e1" fill="#f8fafc" />
@@ -295,6 +302,7 @@ const DashboardView: React.FC<DashboardViewProps> = ({ allStores, forecastMonths
                     dataKey="x" 
                     name="成長率 (k)" 
                     domain={axisDomains.x} 
+                    allowDataOverflow={true}
                     tick={{fontSize: 9}} 
                     tickFormatter={(v) => v.toFixed(3)}
                     label={{ value: '成長速度 (k) →', position: 'bottom', offset: 0, fontSize: 9, fontWeight: 900 }} 
@@ -303,9 +311,10 @@ const DashboardView: React.FC<DashboardViewProps> = ({ allStores, forecastMonths
                     type="number" 
                     dataKey="y" 
                     name="潜在需要 (L)" 
-                    domain={axisDomains.y} 
+                    domain={axisDomains.y}
+                    allowDataOverflow={true}
                     tick={{fontSize: 9}} 
-                    label={{ value: '潜在需要 (L) →', angle: -90, position: 'left', offset: 0, fontSize: 9, fontWeight: 900 }} 
+                    label={{ value: '潜在需要 (L) [千円] →', angle: -90, position: 'left', offset: 0, fontSize: 9, fontWeight: 900 }} 
                 />
                 <ZAxis type="number" dataKey="z" range={[50, 400]} />
                 <Tooltip cursor={{ strokeDasharray: '3 3' }} content={({ active, payload }) => {
@@ -317,7 +326,7 @@ const DashboardView: React.FC<DashboardViewProps> = ({ allStores, forecastMonths
                                 <p>Cluster: {data.cluster + 1}</p>
                                 <div className="mt-1 border-t pt-1">
                                     <p>成長率(k): {data.x.toFixed(3)}</p>
-                                    <p>潜在力(L): {Math.round(data.y).toLocaleString()}</p>
+                                    <p>潜在力(L): {Math.round(data.y).toLocaleString()}千円</p>
                                 </div>
                             </div>
                         );
@@ -346,9 +355,9 @@ const DashboardView: React.FC<DashboardViewProps> = ({ allStores, forecastMonths
                     ))}
                 </defs>
                 <XAxis dataKey="date" tick={{fontSize: 9}} minTickGap={30} />
-                <YAxis tick={{fontSize: 9}} />
+                <YAxis tick={{fontSize: 9}} label={{ value: '売上 (千円)', angle: -90, position: 'left', offset: 0, fontSize: 9 }} />
                 <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E2E8F0" />
-                <Tooltip formatter={(val: number) => val.toLocaleString()} contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)' }} />
+                <Tooltip formatter={(val: number) => val.toLocaleString() + '千円'} contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)' }} />
                 {allCohorts.map((cohort, i) => (
                     !disabledCohorts.includes(cohort) && (
                         <Area
@@ -371,8 +380,8 @@ const DashboardView: React.FC<DashboardViewProps> = ({ allStores, forecastMonths
             <LineChart data={vintageData} margin={{ top: 10, right: 10, bottom: 0, left: 0 }}>
                 <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E2E8F0" />
                 <XAxis dataKey="period" tick={{fontSize: 9}} minTickGap={30} />
-                <YAxis tick={{fontSize: 9}} />
-                <Tooltip formatter={(val: number) => val.toLocaleString()} />
+                <YAxis tick={{fontSize: 9}} label={{ value: '平均売上 (千円)', angle: -90, position: 'left', offset: 0, fontSize: 9 }} />
+                <Tooltip formatter={(val: number) => val.toLocaleString() + '千円'} />
                 <Legend wrapperStyle={{ fontSize: '9px', paddingTop: '10px' }} iconSize={8} />
                 {Object.keys(vintageData[0] || {}).filter(k => k !== 'period').map((key, i) => (
                     <Line 
@@ -416,7 +425,8 @@ const DashboardView: React.FC<DashboardViewProps> = ({ allStores, forecastMonths
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-6 font-bold font-display">
                     <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6 border-l-8 border-[#005EB8]">
                         <p className="text-[10px] text-gray-400 uppercase mb-1">稼働店舗合計予測値</p>
-                        <h3 className="text-3xl font-black text-[#005EB8]">{totalForecast.toLocaleString()}</h3>
+                        {/* totalForecast is sum of raw (1000s). So totalForecast * 1000 Yen. -> / 1000000 = HyakuMan Yen */}
+                        <h3 className="text-3xl font-black text-[#005EB8]">{Math.round(totalForecast / 100).toLocaleString()}<span className="text-sm text-gray-400 ml-2">百万円</span></h3>
                     </div>
                     <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6 border-l-8 border-orange-500">
                         <p className="text-[10px] text-gray-400 uppercase mb-1">分析対象店舗数 (稼働中)</p>
@@ -453,7 +463,7 @@ const DashboardView: React.FC<DashboardViewProps> = ({ allStores, forecastMonths
                                     <tbody>
                                         <tr>
                                             {monthlyForecasts.slice(0, 12).map(d => (
-                                                <td key={d.date} className="px-2 py-2 font-bold text-[#005EB8] border-r border-gray-100">{d.val.toLocaleString()}</td>
+                                                <td key={d.date} className="px-2 py-2 font-bold text-[#005EB8] border-r border-gray-100">{d.val.toLocaleString()}<span className="text-[9px] text-gray-400 ml-0.5">k</span></td>
                                             ))}
                                         </tr>
                                     </tbody>

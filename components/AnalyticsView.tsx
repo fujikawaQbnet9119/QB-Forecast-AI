@@ -52,6 +52,7 @@ const AnalyticsView: React.FC<AnalyticsViewProps> = ({ allStores }) => {
         const totalCount = allStoresList.length;
         const activeRate = totalCount > 0 ? (activeCount / totalCount) * 100 : 0;
         
+        // Data is in 1000 Yen units
         const totalSales = stores.reduce((a, s) => a + (s.stats?.lastYearSales || 0), 0);
         const avgSales = activeCount > 0 ? totalSales / activeCount : 0;
         
@@ -86,11 +87,13 @@ const AnalyticsView: React.FC<AnalyticsViewProps> = ({ allStores }) => {
     }, [stores]);
 
     const topGrowers = useMemo(() => {
-        return [...stores].sort((a, b) => (b.stats?.yoy || 0) - (a.stats?.yoy || 0)).slice(0, 5);
+        // Changed to Top 20
+        return [...stores].sort((a, b) => (b.stats?.yoy || 0) - (a.stats?.yoy || 0)).slice(0, 20);
     }, [stores]);
 
     const worstGrowers = useMemo(() => {
-        return [...stores].sort((a, b) => (a.stats?.yoy || 0) - (b.stats?.yoy || 0)).slice(0, 5);
+        // Changed to Bottom 20
+        return [...stores].sort((a, b) => (a.stats?.yoy || 0) - (b.stats?.yoy || 0)).slice(0, 20);
     }, [stores]);
 
     // 1-B. Contribution Waterfall Data
@@ -141,6 +144,57 @@ const AnalyticsView: React.FC<AnalyticsViewProps> = ({ allStores }) => {
         return data.filter(d => d.gap > 0).sort((a, b) => b.gap - a.gap).slice(0, 10);
     }, [stores]);
 
+    // 1-E: Stability Ranking (Inverse CV)
+    const stabilityRankingData = useMemo(() => {
+        return [...stores]
+            .filter(s => s.stats && s.raw.length >= 12)
+            .sort((a, b) => (a.stats?.cv || 0) - (b.stats?.cv || 0)) // Ascending CV
+            .slice(0, 10)
+            .map(s => ({
+                name: s.name,
+                cv: s.stats?.cv || 0,
+                score: 1 / (s.stats?.cv || 0.01) // Stability Score
+            }));
+    }, [stores]);
+
+    // 1-F: Streak Counter
+    const streakData = useMemo(() => {
+        return stores.map(s => {
+            let streak = 0;
+            const len = s.raw.length;
+            if (len < 13) return { name: s.name, streak: 0 };
+            
+            // Check YoY streaks backwards
+            for (let i = 0; i < len - 12; i++) {
+                const current = s.raw[len - 1 - i];
+                const prevYear = s.raw[len - 1 - i - 12];
+                
+                // Determine direction based on the most recent change
+                if (i === 0) {
+                    if (current > prevYear) streak = 1;
+                    else if (current < prevYear) streak = -1;
+                    else return { name: s.name, streak: 0 };
+                } else {
+                    if (streak > 0 && current > prevYear) streak++;
+                    else if (streak < 0 && current < prevYear) streak--;
+                    else break; // Streak broken
+                }
+            }
+            return { name: s.name, streak };
+        }).sort((a, b) => b.streak - a.streak).slice(0, 15); // Top positive and negative
+    }, [stores]);
+
+    // 1-G: Store LTV Ranking
+    const ltvRankingData = useMemo(() => {
+        return stores.map(s => ({
+            name: s.name,
+            // Input data is in 1000s. 
+            // TotalSales(1000s) * 1000 / 10000 = TotalSales(1000s) / 10 = Man Yen
+            ltv: Math.round((s.stats?.totalSales || 0) / 10) 
+        })).sort((a,b) => b.ltv - a.ltv).slice(0, 15);
+    }, [stores]);
+
+
     // 2. Trend & Cycles
     const seasonalityCluster = useMemo(() => {
         const data = Array.from({ length: 12 }, (_, i) => ({ month: i + 1, v: 0 }));
@@ -177,10 +231,126 @@ const AnalyticsView: React.FC<AnalyticsViewProps> = ({ allStores }) => {
     const lifecycleData = useMemo(() => {
         return stores.map(s => ({
             age: Math.floor(s.raw.length / 12), // Years
-            sales: Math.round(s.stats?.lastYearSales || 0),
+            // Input 1000s -> Man Yen: / 10
+            sales: Math.round((s.stats?.lastYearSales || 0) / 10),
             name: s.name
         }));
     }, [stores]);
+
+    // 2-D: Moving Average Divergence Heatmap
+    const maDivergenceData = useMemo(() => {
+        return stores
+            .filter(s => s.raw.length >= 13)
+            .map(s => {
+                const current = s.raw[s.raw.length - 1];
+                const last12 = s.raw.slice(-13, -1); // Previous 12 months excluding current
+                const ma = last12.reduce((a,b) => a+b, 0) / 12;
+                const div = ma > 0 ? ((current - ma) / ma) * 100 : 0;
+                return { name: s.name, div };
+            })
+            .sort((a, b) => b.div - a.div);
+    }, [stores]);
+
+    // 2-E: Rolling CAGR (3-Year)
+    const rollingCagrData = useMemo(() => {
+        const topStores = [...stores]
+            .sort((a,b) => (b.stats?.lastYearSales||0) - (a.stats?.lastYearSales||0))
+            .slice(0, 5);
+        
+        // Find common years range or just relative years
+        // We will plot CAGR calculated at each year end
+        const data = [];
+        const maxLen = Math.max(...topStores.map(s => s.raw.length));
+        const yearsCount = Math.floor(maxLen / 12);
+        
+        for(let y = 3; y <= yearsCount; y++) {
+            const p: any = { year: `Year ${y}` };
+            topStores.forEach(s => {
+                const idx = y * 12 - 1; // End of year y
+                if (idx < s.raw.length && idx >= 36) {
+                    const endVal = s.raw.slice(idx-11, idx+1).reduce((a,b)=>a+b,0);
+                    const startVal = s.raw.slice(idx-36-11, idx-36+1).reduce((a,b)=>a+b,0); // 3 years prior
+                    if (startVal > 0) {
+                        const cagr = (Math.pow(endVal/startVal, 1/3) - 1) * 100;
+                        p[s.name] = cagr;
+                    }
+                }
+            });
+            if (Object.keys(p).length > 1) data.push(p);
+        }
+        return { data, lines: topStores.map(s => s.name) };
+    }, [stores]);
+
+    // 2-F: SAAR (Seasonally Adjusted Annual Rate)
+    const saarData = useMemo(() => {
+        // Aggregate SAAR vs Raw for all stores (average)
+        const len = 24; // Look at last 24 months
+        const agg: {date: string, raw: number, saar: number}[] = [];
+        
+        // We need date alignment. Simplify to "Months ago".
+        for(let i=0; i<len; i++) {
+            let sumRaw = 0;
+            let sumSaar = 0;
+            let count = 0;
+            
+            stores.forEach(s => {
+                const idx = s.raw.length - 1 - ((len - 1) - i); // From 23 months ago to 0 (now)
+                if (idx >= 0) {
+                    const val = s.raw[idx];
+                    const d = new Date(s.dates[idx].replace(/\//g, '-'));
+                    const m = isNaN(d.getTime()) ? 0 : d.getMonth();
+                    const sea = s.seasonal[m] || 1.0;
+                    
+                    sumRaw += val;
+                    sumSaar += (val / sea) * 12;
+                    count++;
+                }
+            });
+            
+            if (count > 0) {
+                agg.push({
+                    date: `${(len-1)-i}ヶ月前`,
+                    raw: Math.round((sumRaw / count) * 12), // Annualized Raw
+                    saar: Math.round(sumSaar / count)
+                });
+            }
+        }
+        return agg;
+    }, [stores]);
+
+    // 2-G: Cluster Benchmark (Trajectories)
+    const clusterBenchmarkData = useMemo(() => {
+        const sorted = [...stores].sort((a, b) => a.params.L - b.params.L);
+        const n = sorted.length;
+        if (n < 3) return { data: [], clusters: [] };
+        
+        const clusters = [
+            { name: 'Small (<33%)', stores: sorted.slice(0, Math.floor(n/3)), color: '#9CA3AF' },
+            { name: 'Medium (33-66%)', stores: sorted.slice(Math.floor(n/3), Math.floor(2*n/3)), color: '#F59E0B' },
+            { name: 'Large (>66%)', stores: sorted.slice(Math.floor(2*n/3)), color: '#005EB8' }
+        ];
+
+        const maxAge = 60;
+        const data = [];
+        for(let i=0; i<maxAge; i++) {
+            const p: any = { month: i+1 };
+            clusters.forEach(c => {
+                let sum = 0, count = 0;
+                c.stores.forEach(s => {
+                    if (s.raw[i] !== undefined) {
+                        sum += s.raw[i];
+                        count++;
+                    }
+                });
+                if (count >= 3) { // Min 3 samples to plot
+                    p[c.name] = Math.round(sum / count);
+                }
+            });
+            if (Object.keys(p).length > 1) data.push(p);
+        }
+        return { data, clusters };
+    }, [stores]);
+
 
     // 3. Risk: Survival Analysis (Cohort Active Rate)
     const survivalData = useMemo(() => {
@@ -225,6 +395,45 @@ const AnalyticsView: React.FC<AnalyticsViewProps> = ({ allStores }) => {
         return buckets.map((v, i) => ({ range: `<${((i+1)*2)}%`, count: v }));
     }, [stores]);
 
+    // 3-D: Max Drawdown Analysis
+    const maxDrawdownData = useMemo(() => {
+        const buckets = Array(10).fill(0);
+        stores.forEach(s => {
+            let peak = 0;
+            let maxDd = 0;
+            s.raw.forEach(v => {
+                if (v > peak) peak = v;
+                const dd = peak > 0 ? (peak - v) / peak : 0;
+                if (dd > maxDd) maxDd = dd;
+            });
+            // Bucket by 5%
+            const idx = Math.min(9, Math.floor(maxDd * 20)); 
+            buckets[idx]++;
+        });
+        return buckets.map((v, i) => ({ range: `${i*5}%-${(i+1)*5}%`, count: v }));
+    }, [stores]);
+
+    // 3-E: ATH Drawdown (Current vs ATH)
+    const athDrawdownData = useMemo(() => {
+        return stores.map(s => {
+            const ath = Math.max(...s.raw);
+            const current = s.raw[s.raw.length - 1];
+            const dd = ath > 0 ? ((current - ath) / ath) * 100 : 0;
+            return { name: s.name, dd };
+        }).sort((a,b) => a.dd - b.dd).slice(0, 15); // Top 15 worst drops
+    }, [stores]);
+
+    // 3-F: Volatility Smile (Size vs Volatility)
+    const volatilitySmileData = useMemo(() => {
+        return stores.map(s => ({
+            name: s.name,
+            // Input 1000s -> Man Yen: / 10
+            size: Math.round((s.stats?.lastYearSales || 0) / 10), // Annual Sales (Man Yen)
+            cv: (s.stats?.cv || 0) * 100
+        }));
+    }, [stores]);
+
+
     // 4. Pattern: Peak Month Distribution
     const peakMonthData = useMemo(() => {
         const counts = Array(12).fill(0);
@@ -245,7 +454,7 @@ const AnalyticsView: React.FC<AnalyticsViewProps> = ({ allStores }) => {
             name: s.name,
             x: Number(((s.stats?.cv || 0) * 100).toFixed(1)), // Risk (CV)
             y: Number(((s.stats?.cagr || 0) * 100).toFixed(1)), // Return (CAGR)
-            z: Math.round((s.stats?.lastYearSales || 0) / 10000) // Size
+            z: Math.round((s.stats?.lastYearSales || 0) / 10) // Size (Man Yen)
         }));
     }, [stores]);
 
@@ -270,8 +479,11 @@ const AnalyticsView: React.FC<AnalyticsViewProps> = ({ allStores }) => {
 
     // 7. Pricing Simulator Data
     const pricingData = useMemo(() => {
-        const totalCustomers = kpis.totalSales / currentPrice; // Approximation
-        const baseRev = totalCustomers * currentPrice;
+        // kpis.totalSales is in 1000s. Convert to Real Yen for calc.
+        const totalSalesRealYen = kpis.totalSales * 1000;
+        const totalCustomers = totalSalesRealYen / currentPrice; 
+        
+        const baseRev = totalCustomers * currentPrice; // Should equal totalSalesRealYen
         
         // Scenario
         const newCustomers = totalCustomers * (1 - churnRate / 100);
@@ -346,6 +558,55 @@ const AnalyticsView: React.FC<AnalyticsViewProps> = ({ allStores }) => {
         return { meanK, stdK, significantHigh, significantLow, histogramData, trajectories, standardCurve };
     }, [stores, kpis.medianK]);
 
+    // 8-B: Aging Curve (Average Sales by Age)
+    const agingCurveData = useMemo(() => {
+        const ageMap = new Map<number, number[]>();
+        stores.forEach(s => {
+            s.raw.forEach((val, i) => {
+                if (val > 0) {
+                    if (!ageMap.has(i)) ageMap.set(i, []);
+                    ageMap.get(i)?.push(val);
+                }
+            });
+        });
+
+        const data: any[] = [];
+        const maxAge = 60;
+        for (let i = 0; i < maxAge; i++) {
+            const vals = ageMap.get(i);
+            if (vals && vals.length >= 5) {
+                vals.sort((a,b) => a-b);
+                const q1 = vals[Math.floor(vals.length * 0.25)];
+                const median = vals[Math.floor(vals.length * 0.5)];
+                const q3 = vals[Math.floor(vals.length * 0.75)];
+                data.push({
+                    month: i + 1,
+                    // Input 1000s -> Man Yen: / 10
+                    median: Math.round(median / 10),
+                    range: [Math.round(q1 / 10), Math.round(q3 / 10)]
+                });
+            }
+        }
+        return data;
+    }, [stores]);
+
+    // 8-C: L Utilization Meter (Capacity Saturation)
+    const utilizationData = useMemo(() => {
+        const buckets = Array(11).fill(0);
+        stores.forEach(s => {
+            const current = s.raw[s.raw.length - 1];
+            const L = s.params.L;
+            const rate = L > 0 ? (current / L) * 100 : 0;
+            const idx = Math.min(10, Math.floor(rate / 10));
+            buckets[idx]++;
+        });
+        return buckets.map((c, i) => ({
+            range: i === 10 ? '100%+' : `${i*10}-${(i+1)*10}%`,
+            count: c
+        }));
+    }, [stores]);
+
+
     const tabClass = (tab: string) => `px-6 py-3 rounded-full text-xs font-black transition-all font-display ${activeTab === tab ? 'bg-[#005EB8] text-white shadow-lg shadow-blue-200 transform scale-105' : 'bg-white text-gray-400 hover:bg-gray-50'}`;
 
     const ExpandButton = ({ target }: { target: string }) => (
@@ -390,7 +651,7 @@ const AnalyticsView: React.FC<AnalyticsViewProps> = ({ allStores }) => {
                         <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#f3f4f6" />
                         <XAxis type="number" hide />
                         <YAxis dataKey="name" type="category" width={80} tick={{fontSize: 9, fontWeight: 'bold'}} />
-                        <Tooltip formatter={(val: number) => val.toLocaleString()} cursor={{fill: 'transparent'}} contentStyle={{borderRadius:'12px', border:'none', boxShadow:'0 10px 15px -3px rgba(0,0,0,0.1)'}} />
+                        <Tooltip formatter={(val: number) => val.toLocaleString() + 'k'} cursor={{fill: 'transparent'}} contentStyle={{borderRadius:'12px', border:'none', boxShadow:'0 10px 15px -3px rgba(0,0,0,0.1)'}} />
                         <ReferenceLine x={0} stroke="#000" />
                         <Bar dataKey="val" radius={[0, 4, 4, 0]}>
                             {contributionData.map((entry, index) => <Cell key={`cell-${index}`} fill={entry.val > 0 ? '#10B981' : '#EF4444'} />)}
@@ -404,11 +665,80 @@ const AnalyticsView: React.FC<AnalyticsViewProps> = ({ allStores }) => {
                         <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#f3f4f6" />
                         <XAxis type="number" hide />
                         <YAxis dataKey="name" type="category" width={80} tick={{fontSize: 9, fontWeight: 'bold'}} />
-                        <Tooltip formatter={(val: number) => val.toLocaleString()} cursor={{fill: 'transparent'}} contentStyle={{borderRadius:'12px', border:'none', boxShadow:'0 10px 15px -3px rgba(0,0,0,0.1)'}} />
+                        <Tooltip formatter={(val: number) => val.toLocaleString() + 'k'} cursor={{fill: 'transparent'}} contentStyle={{borderRadius:'12px', border:'none', boxShadow:'0 10px 15px -3px rgba(0,0,0,0.1)'}} />
                         <Bar dataKey="gap" name="月間売上余地" radius={[0, 4, 4, 0]} fill="#8B5CF6">
-                            <LabelList dataKey="gap" position="right" fontSize={9} formatter={(v: number) => Math.round(v).toLocaleString()} />
+                            <LabelList dataKey="gap" position="right" fontSize={9} formatter={(v: number) => Math.round(v).toLocaleString() + 'k'} />
                         </Bar>
                     </BarChart>
+                </ResponsiveContainer>
+            );
+            case 'stability': return (
+                <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={stabilityRankingData} layout="vertical" margin={{ top: 0, right: 20, bottom: 0, left: 0 }}>
+                        <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#f3f4f6" />
+                        <XAxis type="number" hide />
+                        <YAxis dataKey="name" type="category" width={80} tick={{fontSize: 9, fontWeight: 'bold'}} />
+                        <Tooltip formatter={(val: number) => val.toFixed(1)} cursor={{fill: 'transparent'}} contentStyle={{borderRadius:'12px', border:'none', boxShadow:'0 10px 15px -3px rgba(0,0,0,0.1)'}} />
+                        <Bar dataKey="score" name="安定性スコア" radius={[0, 4, 4, 0]} fill="#10B981">
+                            <LabelList dataKey="score" position="right" fontSize={9} formatter={(v: number) => v.toFixed(1)} />
+                        </Bar>
+                    </BarChart>
+                </ResponsiveContainer>
+            );
+            case 'streak': return (
+                <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={streakData} layout="vertical" margin={{ top: 0, right: 20, bottom: 0, left: 0 }}>
+                        <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#f3f4f6" />
+                        <XAxis type="number" hide />
+                        <YAxis dataKey="name" type="category" width={80} tick={{fontSize: 9, fontWeight: 'bold'}} />
+                        <Tooltip contentStyle={{borderRadius:'12px', border:'none', boxShadow:'0 10px 15px -3px rgba(0,0,0,0.1)'}} />
+                        <ReferenceLine x={0} stroke="#000" />
+                        <Bar dataKey="streak" name="連続記録(月)">
+                            {streakData.map((entry, index) => <Cell key={`cell-${index}`} fill={entry.streak > 0 ? '#10B981' : '#EF4444'} />)}
+                            <LabelList dataKey="streak" position={streakData[0].streak > 0 ? "right" : "left"} fontSize={9} />
+                        </Bar>
+                    </BarChart>
+                </ResponsiveContainer>
+            );
+            case 'maDivergence': return (
+                <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={maDivergenceData.slice(0, 10).concat(maDivergenceData.slice(-10))} layout="vertical" margin={{ top: 0, right: 20, bottom: 0, left: 0 }}>
+                        <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#f3f4f6" />
+                        <XAxis type="number" hide />
+                        <YAxis dataKey="name" type="category" width={80} tick={{fontSize: 9, fontWeight: 'bold'}} />
+                        <Tooltip formatter={(val: number) => val.toFixed(1) + '%'} cursor={{fill: 'transparent'}} contentStyle={{borderRadius:'12px', border:'none', boxShadow:'0 10px 15px -3px rgba(0,0,0,0.1)'}} />
+                        <ReferenceLine x={0} stroke="#000" />
+                        <Bar dataKey="div" name="乖離率">
+                            {maDivergenceData.slice(0, 10).concat(maDivergenceData.slice(-10)).map((entry, index) => <Cell key={`cell-${index}`} fill={entry.div > 0 ? '#10B981' : '#EF4444'} />)}
+                        </Bar>
+                    </BarChart>
+                </ResponsiveContainer>
+            );
+            case 'saar': return (
+                <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={saarData} margin={{ top: 10, right: 10, bottom: 0, left: 0 }}>
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f3f4f6" />
+                        <XAxis dataKey="date" tick={{fontSize:9}} />
+                        <YAxis tick={{fontSize:9}} />
+                        <Tooltip formatter={(val: number) => val.toLocaleString() + 'k'} contentStyle={{borderRadius:'12px', border:'none', boxShadow:'0 10px 15px -3px rgba(0,0,0,0.1)'}} />
+                        <Legend wrapperStyle={{ fontSize: '9px', paddingTop: '10px' }} iconSize={8} />
+                        <Line type="monotone" dataKey="raw" name="実績 (Raw)" stroke="#94A3B8" strokeWidth={1} dot={false} strokeDasharray="3 3" />
+                        <Line type="monotone" dataKey="saar" name="季節調整済年率 (SAAR)" stroke="#F59E0B" strokeWidth={3} dot={false} />
+                    </LineChart>
+                </ResponsiveContainer>
+            );
+            case 'rollingCagr': return (
+                <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={rollingCagrData.data} margin={{ top: 10, right: 10, bottom: 0, left: 0 }}>
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f3f4f6" />
+                        <XAxis dataKey="year" tick={{fontSize:9}} />
+                        <YAxis tick={{fontSize:9}} unit="%" />
+                        <Tooltip formatter={(val: number) => val.toFixed(1) + '%'} contentStyle={{borderRadius:'12px', border:'none', boxShadow:'0 10px 15px -3px rgba(0,0,0,0.1)'}} />
+                        <Legend wrapperStyle={{ fontSize: '9px', paddingTop: '10px' }} iconSize={8} />
+                        {rollingCagrData.lines.map((name, i) => (
+                            <Line key={name} type="monotone" dataKey={name} stroke={`hsl(${i * 45}, 70%, 50%)`} strokeWidth={2} dot={false} />
+                        ))}
+                    </LineChart>
                 </ResponsiveContainer>
             );
             case 'trajectory': return (
@@ -434,8 +764,8 @@ const AnalyticsView: React.FC<AnalyticsViewProps> = ({ allStores }) => {
                     <ScatterChart margin={{ top: 10, right: 10, bottom: 0, left: 0 }}>
                         <CartesianGrid strokeDasharray="3 3" stroke="#f3f4f6" />
                         <XAxis type="number" dataKey="age" name="店舗年齢 (年)" unit="年" label={{ value: '経過年数 →', position: 'bottom', offset: 0, fontSize: 9 }} tick={{fontSize:9}} />
-                        <YAxis type="number" dataKey="sales" name="年間売上" tick={{fontSize:9}} unit="円" label={{ value: '年間売上 →', angle: -90, position: 'left', offset: 0, fontSize: 9 }} />
-                        <Tooltip formatter={(val: number) => val.toLocaleString()} cursor={{ strokeDasharray: '3 3' }} contentStyle={{borderRadius:'12px', border:'none', boxShadow:'0 10px 15px -3px rgba(0,0,0,0.1)'}} />
+                        <YAxis type="number" dataKey="sales" name="年間売上" tick={{fontSize:9}} unit="万円" label={{ value: '年間売上 (万円) →', angle: -90, position: 'left', offset: 0, fontSize: 9 }} />
+                        <Tooltip formatter={(val: number) => val.toLocaleString() + '万円'} cursor={{ strokeDasharray: '3 3' }} contentStyle={{borderRadius:'12px', border:'none', boxShadow:'0 10px 15px -3px rgba(0,0,0,0.1)'}} />
                         <Scatter name="Stores" data={lifecycleData} fill="#F59E0B" fillOpacity={0.5} />
                     </ScatterChart>
                 </ResponsiveContainer>
@@ -517,6 +847,41 @@ const AnalyticsView: React.FC<AnalyticsViewProps> = ({ allStores }) => {
                     </BarChart>
                 </ResponsiveContainer>
             );
+            case 'maxDrawdown': return (
+                <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={maxDrawdownData} margin={{ top: 0, right: 0, bottom: 0, left: 0 }}>
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f3f4f6" />
+                        <XAxis dataKey="range" tick={{fontSize:9}} label={{ value: '最大ドローダウン率', position: 'bottom', offset: 0, fontSize: 9 }} />
+                        <YAxis tick={{fontSize:9}} />
+                        <Tooltip cursor={{fill: '#f3f4f6'}} contentStyle={{borderRadius:'12px', border:'none', boxShadow:'0 10px 15px -3px rgba(0,0,0,0.1)'}} />
+                        <Bar dataKey="count" fill="#EF4444" radius={[4, 4, 0, 0]} name="店舗数" />
+                    </BarChart>
+                </ResponsiveContainer>
+            );
+            case 'athDrawdown': return (
+                <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={athDrawdownData} layout="vertical" margin={{ top: 0, right: 20, bottom: 0, left: 0 }}>
+                        <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#f3f4f6" />
+                        <XAxis type="number" hide />
+                        <YAxis dataKey="name" type="category" width={80} tick={{fontSize: 9, fontWeight: 'bold'}} />
+                        <Tooltip formatter={(val: number) => val.toFixed(1) + '%'} cursor={{fill: 'transparent'}} contentStyle={{borderRadius:'12px', border:'none', boxShadow:'0 10px 15px -3px rgba(0,0,0,0.1)'}} />
+                        <Bar dataKey="dd" name="ATH下落率" radius={[0, 4, 4, 0]} fill="#F59E0B">
+                            <LabelList dataKey="dd" position="right" fontSize={9} formatter={(v: number) => v.toFixed(1) + '%'} />
+                        </Bar>
+                    </BarChart>
+                </ResponsiveContainer>
+            );
+            case 'smile': return (
+                <ResponsiveContainer width="100%" height="100%">
+                    <ScatterChart margin={{ top: 10, right: 10, bottom: 0, left: 0 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#f3f4f6" />
+                        <XAxis type="number" dataKey="size" name="売上規模 (万円)" unit="万円" label={{ value: '売上規模 (万円) →', position: 'bottom', offset: 0, fontSize: 9 }} tick={{fontSize:9}} />
+                        <YAxis type="number" dataKey="cv" name="変動率(CV)" tick={{fontSize:9}} unit="%" label={{ value: '変動率 (CV) →', angle: -90, position: 'left', offset: 0, fontSize: 9 }} />
+                        <Tooltip cursor={{ strokeDasharray: '3 3' }} contentStyle={{borderRadius:'12px', border:'none', boxShadow:'0 10px 15px -3px rgba(0,0,0,0.1)'}} />
+                        <Scatter name="Stores" data={volatilitySmileData} fill="#8B5CF6" fillOpacity={0.5} />
+                    </ScatterChart>
+                </ResponsiveContainer>
+            );
             case 'peak': return (
                 <ResponsiveContainer width="100%" height="100%">
                     <BarChart data={peakMonthData} margin={{ top: 0, right: 0, bottom: 0, left: 0 }}>
@@ -570,9 +935,60 @@ const AnalyticsView: React.FC<AnalyticsViewProps> = ({ allStores }) => {
                     </LineChart>
                 </ResponsiveContainer>
             );
+            case 'ltv': return (
+                <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={ltvRankingData} layout="vertical" margin={{ top: 0, right: 20, bottom: 0, left: 0 }}>
+                        <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#f3f4f6" />
+                        <XAxis type="number" hide />
+                        <YAxis dataKey="name" type="category" width={80} tick={{fontSize: 9, fontWeight: 'bold'}} />
+                        <Tooltip formatter={(val: number) => val.toLocaleString() + '万円'} cursor={{fill: 'transparent'}} contentStyle={{borderRadius:'12px', border:'none', boxShadow:'0 10px 15px -3px rgba(0,0,0,0.1)'}} />
+                        <Bar dataKey="ltv" name="累積売上(万円)" radius={[0, 4, 4, 0]} fill="#005EB8">
+                            <LabelList dataKey="ltv" position="right" fontSize={9} formatter={(v: number) => v.toLocaleString()} />
+                        </Bar>
+                    </BarChart>
+                </ResponsiveContainer>
+            );
+            case 'aging': return (
+                <ResponsiveContainer width="100%" height="100%">
+                    <ComposedChart data={agingCurveData} margin={{ top: 10, right: 10, bottom: 0, left: 0 }}>
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f3f4f6" />
+                        <XAxis dataKey="month" tick={{fontSize:9}} label={{ value: '経過月数', position: 'bottom', offset: 0, fontSize: 9 }} />
+                        <YAxis tick={{fontSize:9}} />
+                        <Tooltip formatter={(val: number) => val.toLocaleString() + '万円'} contentStyle={{borderRadius:'12px', border:'none', boxShadow:'0 10px 15px -3px rgba(0,0,0,0.1)'}} />
+                        <Legend wrapperStyle={{ fontSize: '9px', paddingTop: '10px' }} iconSize={8} />
+                        <Area type="monotone" dataKey="range" fill="#005EB8" fillOpacity={0.1} stroke="transparent" name="範囲 (Q1-Q3)" />
+                        <Line type="monotone" dataKey="median" stroke="#005EB8" strokeWidth={3} dot={false} name="中央値 (Median)" />
+                    </ComposedChart>
+                </ResponsiveContainer>
+            );
+            case 'utilization': return (
+                <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={utilizationData} margin={{ top: 0, right: 0, bottom: 0, left: 0 }}>
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f3f4f6" />
+                        <XAxis dataKey="range" tick={{fontSize:9}} />
+                        <YAxis tick={{fontSize:9}} />
+                        <Tooltip cursor={{fill: '#f3f4f6'}} contentStyle={{borderRadius:'12px', border:'none', boxShadow:'0 10px 15px -3px rgba(0,0,0,0.1)'}} />
+                        <Bar dataKey="count" fill="#3B82F6" radius={[4, 4, 0, 0]} name="店舗数" />
+                    </BarChart>
+                </ResponsiveContainer>
+            );
+            case 'clusterBench': return (
+                <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={clusterBenchmarkData.data} margin={{ top: 10, right: 10, bottom: 0, left: 0 }}>
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f3f4f6" />
+                        <XAxis dataKey="month" tick={{fontSize:9}} label={{ value: '経過月数', position: 'bottom', offset: 0, fontSize: 9 }} />
+                        <YAxis tick={{fontSize:9}} />
+                        <Tooltip formatter={(val: number) => val.toLocaleString()} contentStyle={{borderRadius:'12px', border:'none', boxShadow:'0 10px 15px -3px rgba(0,0,0,0.1)'}} />
+                        <Legend wrapperStyle={{ fontSize: '9px', paddingTop: '10px' }} iconSize={8} />
+                        {clusterBenchmarkData.clusters.map((c, i) => (
+                            <Line key={c.name} type="monotone" dataKey={c.name} stroke={c.color} strokeWidth={2} dot={false} name={c.name} />
+                        ))}
+                    </LineChart>
+                </ResponsiveContainer>
+            );
             default: return null;
         }
-    }, [abcData, lorenzData, contributionData, opportunityData, normalizedGrowthData, lifecycleData, seasonalityCluster, stores, survivalData, riskReturnData, cvHistogram, fitQualityData, peakMonthData, pricingData, growthAnalysis, kpis.medianK]);
+    }, [abcData, lorenzData, contributionData, opportunityData, normalizedGrowthData, lifecycleData, seasonalityCluster, stores, survivalData, riskReturnData, cvHistogram, fitQualityData, peakMonthData, pricingData, growthAnalysis, kpis.medianK, stabilityRankingData, streakData, maDivergenceData, saarData, rollingCagrData, maxDrawdownData, athDrawdownData, volatilitySmileData, ltvRankingData, agingCurveData, utilizationData, clusterBenchmarkData]);
 
     return (
         <div className="absolute inset-0 overflow-y-auto p-4 md:p-8 animate-fadeIn bg-[#F8FAFC]">
@@ -601,14 +1017,14 @@ const AnalyticsView: React.FC<AnalyticsViewProps> = ({ allStores }) => {
                     <StatCard title="全登録店舗" value={kpis.totalCount} color="text-gray-500" />
                     <StatCard title="稼働率" value={`${kpis.activeRate.toFixed(1)}%`} color={kpis.activeRate > 90 ? "text-green-500" : "text-orange-500"} />
                     <StatCard title="平均店舗月齢" value={`${Math.round(kpis.avgAge)}ヶ月`} />
-                    <StatCard title="平均店舗月商" value={Math.round(kpis.avgSales / 1000).toLocaleString() + 'k'} />
+                    <StatCard title="平均店舗月商" value={Math.round(kpis.avgSales / 10).toLocaleString() + '万円'} />
                     <StatCard title="昨対成長率" value={`${(kpis.avgYoy * 100).toFixed(1)}%`} color={kpis.avgYoy > 0 ? "text-green-500" : "text-red-500"} />
                     <StatCard title="ジニ係数" value={kpis.gini.toFixed(2)} color={kpis.gini > 0.4 ? "text-red-500" : "text-green-500"} />
                     <StatCard title="平均効率(Sales/L)" value={`${(kpis.avgEff * 100).toFixed(0)}%`} />
                     <StatCard title="Median Growth(k)" value={kpis.medianK.toFixed(3)} />
-                    <StatCard title="Median Potential(L)" value={Math.round(kpis.medianL / 1000) + 'k'} />
+                    <StatCard title="Median Potential(L)" value={Math.round(kpis.medianL / 10).toLocaleString() + '万円'} />
                     <StatCard title="平均変動率(CV)" value={`${(kpis.avgCV * 100).toFixed(1)}%`} />
-                    <StatCard title="総売上規模(Annual)" value={(kpis.totalSales / 100000000).toFixed(1) + '億'} />
+                    <StatCard title="総売上規模(Annual)" value={(kpis.totalSales / 100000).toFixed(1) + '億円'} />
                     <StatCard title="Aランク比率" value={`${((abcData[0].value / stores.length)*100).toFixed(0)}%`} />
                     <StatCard title="Top 10シェア" value="18.2%" color="text-gray-400" />
                     <StatCard title="生存率(5yr)" value="82%" color="text-gray-400" />
@@ -617,10 +1033,40 @@ const AnalyticsView: React.FC<AnalyticsViewProps> = ({ allStores }) => {
 
                 {/* Content Area */}
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    {/* ... (Rest of the component remains largely the same, chart rendering logic handles the data) ... */}
+                    {/* Just need to ensure the Chart Rendering calls above use the updated data memos */}
+                    {/* I'll include the rest of the return block to be safe, though no changes needed in JSX structure */}
                     
                     {/* --- RANKING TAB --- */}
                     {activeTab === 'ranking' && (
                         <>
+                            {/* Streak Counter (NEW) */}
+                            <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-100 h-[360px] relative group">
+                                <ExpandButton target="streak" />
+                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display">ストリーク・カウンター (連続増収/減収記録)</h3>
+                                <div className="h-full pb-8">
+                                    {renderChart('streak')}
+                                </div>
+                            </div>
+
+                            {/* Store LTV Ranking (NEW) */}
+                            <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-100 h-[360px] relative group">
+                                <ExpandButton target="ltv" />
+                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display">店舗生涯価値ランキング (Store LTV - Cumulative Sales)</h3>
+                                <div className="h-full pb-8">
+                                    {renderChart('ltv')}
+                                </div>
+                            </div>
+
+                            {/* Stability Ranking (NEW) */}
+                            <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-100 h-[360px] relative group">
+                                <ExpandButton target="stability" />
+                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display">売上安定性ランキング (Stability Score)</h3>
+                                <div className="h-full pb-8">
+                                    {renderChart('stability')}
+                                </div>
+                            </div>
+
                             {/* ABC Analysis */}
                             <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-100 relative overflow-hidden h-[360px] group">
                                 <ExpandButton target="abc" />
@@ -663,9 +1109,9 @@ const AnalyticsView: React.FC<AnalyticsViewProps> = ({ allStores }) => {
 
                             {/* Top & Worst Growers */}
                             <div className="md:col-span-2 grid grid-cols-1 md:grid-cols-2 gap-6">
-                                <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-100">
-                                    <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display">Top 5 Growth (昨対増収率)</h3>
-                                    <div className="space-y-3">
+                                <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-100 h-[600px] flex flex-col">
+                                    <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display flex-shrink-0">Top 20 Growth (昨対増収率)</h3>
+                                    <div className="space-y-3 overflow-y-auto pr-2 flex-1">
                                         {topGrowers.map((s, i) => (
                                             <div key={s.name} className="flex items-center gap-4 p-2 hover:bg-gray-50 rounded-xl transition-colors">
                                                 <div className="w-6 text-sm font-black text-gray-300 font-display">#{i+1}</div>
@@ -682,9 +1128,9 @@ const AnalyticsView: React.FC<AnalyticsViewProps> = ({ allStores }) => {
                                         ))}
                                     </div>
                                 </div>
-                                <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-100">
-                                    <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display">Bottom 5 Growth (昨対減収率)</h3>
-                                    <div className="space-y-3">
+                                <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-100 h-[600px] flex flex-col">
+                                    <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display flex-shrink-0">Bottom 20 Growth (昨対減収率)</h3>
+                                    <div className="space-y-3 overflow-y-auto pr-2 flex-1">
                                         {worstGrowers.map((s, i) => (
                                             <div key={s.name} className="flex items-center gap-4 p-2 hover:bg-gray-50 rounded-xl transition-colors">
                                                 <div className="w-6 text-sm font-black text-gray-300 font-display">#{i+1}</div>
@@ -708,10 +1154,46 @@ const AnalyticsView: React.FC<AnalyticsViewProps> = ({ allStores }) => {
                     {/* --- TREND TAB --- */}
                     {activeTab === 'trend' && (
                         <>
+                            {/* Cluster Benchmark Trajectories (NEW) */}
+                            <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-100 h-[360px] relative group">
+                                <ExpandButton target="clusterBench" />
+                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display">規模別成長ベンチマーク (Cluster Growth Trajectory)</h3>
+                                <div className="h-full pb-8">
+                                    {renderChart('clusterBench')}
+                                </div>
+                            </div>
+
+                            {/* MA Divergence Heatmap (NEW) */}
+                            <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-100 h-[360px] relative group">
+                                <ExpandButton target="maDivergence" />
+                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display">移動平均乖離率ヒートマップ (Trend Reversal)</h3>
+                                <div className="h-full pb-8">
+                                    {renderChart('maDivergence')}
+                                </div>
+                            </div>
+
+                            {/* Rolling CAGR (NEW) */}
+                            <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-100 h-[360px] relative group">
+                                <ExpandButton target="rollingCagr" />
+                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display">ローリングCAGR推移 (3年成長率の変化)</h3>
+                                <div className="h-full pb-8">
+                                    {renderChart('rollingCagr')}
+                                </div>
+                            </div>
+
+                            {/* SAAR (NEW) */}
+                            <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-100 h-[360px] relative group">
+                                <ExpandButton target="saar" />
+                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display">季節調整済み年率換算推移 (SAAR)</h3>
+                                <div className="h-full pb-8">
+                                    {renderChart('saar')}
+                                </div>
+                            </div>
+
                             {/* Normalized Growth Trajectory */}
-                            <div className="md:col-span-2 bg-white rounded-2xl p-5 shadow-sm border border-gray-100 h-[400px] relative group">
+                            <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-100 h-[360px] relative group">
                                 <ExpandButton target="trajectory" />
-                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display">初動成長軌跡比較 (Normalized Trajectory) - Top 15</h3>
+                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display">初動成長軌跡比較 (Normalized Trajectory)</h3>
                                 <div className="h-full pb-8">
                                     {renderChart('trajectory')}
                                 </div>
@@ -749,8 +1231,35 @@ const AnalyticsView: React.FC<AnalyticsViewProps> = ({ allStores }) => {
                     {/* --- RISK TAB --- */}
                     {activeTab === 'risk' && (
                         <>
+                            {/* Max Drawdown (NEW) */}
+                            <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-100 h-[360px] relative group">
+                                <ExpandButton target="maxDrawdown" />
+                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display">最大ドローダウン分布 (Max Drawdown)</h3>
+                                <div className="h-full pb-8">
+                                    {renderChart('maxDrawdown')}
+                                </div>
+                            </div>
+
+                            {/* ATH Drawdown (NEW) */}
+                            <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-100 h-[360px] relative group">
+                                <ExpandButton target="athDrawdown" />
+                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display">過去最高売上からの下落率 (ATH Drawdown)</h3>
+                                <div className="h-full pb-8">
+                                    {renderChart('athDrawdown')}
+                                </div>
+                            </div>
+
+                            {/* Volatility Smile (NEW) */}
+                            <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-100 h-[360px] relative group">
+                                <ExpandButton target="smile" />
+                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display">ボラティリティ・スマイル (規模 vs 変動率)</h3>
+                                <div className="h-full pb-8">
+                                    {renderChart('smile')}
+                                </div>
+                            </div>
+
                             {/* Survival Analysis */}
-                            <div className="md:col-span-2 bg-white rounded-2xl p-5 shadow-sm border border-gray-100 h-[400px] relative group">
+                            <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-100 h-[360px] relative group">
                                 <ExpandButton target="survival" />
                                 <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display">生存率分析 (Survival Rate by Vintage Year)</h3>
                                 <div className="h-full pb-8">
@@ -897,6 +1406,24 @@ const AnalyticsView: React.FC<AnalyticsViewProps> = ({ allStores }) => {
                     {/* --- GROWTH TAB (NEW) --- */}
                     {activeTab === 'growth' && (
                         <>
+                            {/* Aging Curve (NEW) */}
+                            <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-100 h-[360px] relative group">
+                                <ExpandButton target="aging" />
+                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display">店舗年齢別 平均売上カーブ (Aging Curve - Median)</h3>
+                                <div className="h-full pb-8">
+                                    {renderChart('aging')}
+                                </div>
+                            </div>
+
+                            {/* L Utilization Meter (NEW) */}
+                            <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-100 h-[360px] relative group">
+                                <ExpandButton target="utilization" />
+                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display">潜在需要(L) 消化率分布 (Capacity Utilization)</h3>
+                                <div className="h-full pb-8">
+                                    {renderChart('utilization')}
+                                </div>
+                            </div>
+
                             {/* Growth Rate Distribution */}
                             <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-100 h-[360px] relative group">
                                 <ExpandButton target="growthK" />

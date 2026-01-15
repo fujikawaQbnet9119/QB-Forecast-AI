@@ -73,19 +73,19 @@ const StoreAnalysisView: React.FC<StoreAnalysisViewProps> = ({ allStores, foreca
             fd.setMonth(lastDate.getMonth() + t);
             const label = `${fd.getFullYear()}-${String(fd.getMonth() + 1).padStart(2, '0')}`;
             
-            // Standard Forecast
+            // Standard Forecast (Base)
             const tr = logisticModel(idx, d.fit.params, d.fit.mode, d.fit.shockIdx);
-            const baseVal = (tr * (d.seasonal[fd.getMonth()] || 1.0)) + (d.nudge * Math.pow(decay, t));
+            const baseValRaw = (tr * (d.seasonal[fd.getMonth()] || 1.0)) + (d.nudge * Math.pow(decay, t));
             const unc = d.stdDev * (1 + t * 0.05);
             
-            const val = baseVal < 0 ? 0 : baseVal;
-            const upper = Math.max(0, val + z * unc);
-            const lower = Math.max(0, val - z * unc);
+            const baseVal = baseValRaw < 0 ? 0 : baseValRaw;
+            const upper = Math.max(0, baseVal + z * unc);
+            const lower = Math.max(0, baseVal - z * unc);
 
-            // Simulation Forecast
+            // Simulation Forecast (Gradual Transition)
             let simVal: number | null = null;
             if (simMode) {
-                // Adjust params for simulation
+                // 1. Calculate Target Value with Modified Params
                 const simParams = { ...d.fit.params };
                 if (d.fit.mode === 'shift' || d.fit.mode === 'recovery') {
                     simParams.L_post *= simL;
@@ -95,15 +95,25 @@ const StoreAnalysisView: React.FC<StoreAnalysisViewProps> = ({ allStores, foreca
                 simParams.k *= simK;
 
                 const trSim = logisticModel(idx, simParams, d.fit.mode, d.fit.shockIdx);
-                // We keep nudge/seasonality same for simulation foundation, but apply scaling
-                simVal = (trSim * (d.seasonal[fd.getMonth()] || 1.0)) + (d.nudge * Math.pow(decay, t));
+                let targetVal = (trSim * (d.seasonal[fd.getMonth()] || 1.0)) + (d.nudge * Math.pow(decay, t));
+                if (targetVal < 0) targetVal = 0;
+
+                // 2. Interpolate from Base to Target over 24 months
+                const transitionMonths = 24;
+                const progress = Math.min(t / transitionMonths, 1.0);
+                
+                // Linear interpolation:
+                // t=0 (current) -> 0% change
+                // t=24 (2 years) -> 100% change (Full Target)
+                simVal = baseVal + (targetVal - baseVal) * progress;
+                
                 if (simVal < 0) simVal = 0;
             }
 
             data.push({
                 date: label,
                 actual: null,
-                forecast: Math.round(val),
+                forecast: Math.round(baseVal),
                 range: [Math.round(lower), Math.round(upper)],
                 simulated: simVal ? Math.round(simVal) : null
             });
@@ -222,12 +232,12 @@ const StoreAnalysisView: React.FC<StoreAnalysisViewProps> = ({ allStores, foreca
             <ComposedChart data={chartData} margin={{top:5, right:10, bottom:0, left:0}}>
                 <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9"/>
                 <XAxis dataKey="date" tick={{fontSize:9}} minTickGap={30} tickMargin={10} />
-                <YAxis tick={{fontSize:9}} />
-                <Tooltip formatter={(val: number) => val.toLocaleString()} labelStyle={{color:'black'}} contentStyle={{borderRadius:'16px', border:'none', boxShadow:'0 10px 15px -3px rgba(0,0,0,0.1)'}} />
+                <YAxis tick={{fontSize:9}} label={{ value: '売上 (千円)', angle: -90, position: 'left', offset: 0, fontSize: 9 }} />
+                <Tooltip formatter={(val: number) => val.toLocaleString() + '千円'} labelStyle={{color:'black'}} contentStyle={{borderRadius:'16px', border:'none', boxShadow:'0 10px 15px -3px rgba(0,0,0,0.1)'}} />
                 <Legend wrapperStyle={{ fontSize: '9px', paddingTop: '10px' }} iconSize={8} />
                 {!simMode && <Area type="monotone" dataKey="range" fill="#005EB8" fillOpacity={0.1} stroke="transparent" name="信頼区間" />}
                 <Line type="monotone" dataKey="forecast" stroke="#005EB8" strokeWidth={3} strokeDasharray={simMode ? "3 3" : "0"} dot={false} name="AI予測 (Base)" strokeOpacity={simMode ? 0.5 : 1} />
-                {simMode && <Line type="monotone" dataKey="simulated" stroke="#9333EA" strokeWidth={3} dot={false} name="Simulation" animationDuration={300} />}
+                {simMode && <Line type="monotone" dataKey="simulated" stroke="#9333EA" strokeWidth={3} dot={false} name="Simulation (24mo Adjust)" animationDuration={300} />}
                 <Line type="monotone" dataKey="actual" stroke="#1A1A1A" strokeWidth={2} dot={{r:2, fill:'#1A1A1A'}} name="実績" />
                 <Brush dataKey="date" height={20} stroke="#cbd5e1" fill="#f8fafc" />
             </ComposedChart>
@@ -240,7 +250,7 @@ const StoreAnalysisView: React.FC<StoreAnalysisViewProps> = ({ allStores, foreca
                 <Line type="monotone" dataKey="trend" stroke="#F59E0B" strokeWidth={3} dot={false} />
                 <XAxis dataKey="date" hide />
                 <YAxis domain={['auto', 'auto']} hide />
-                <Tooltip formatter={(val: number) => val.toLocaleString()} contentStyle={{borderRadius:'12px', border:'none', boxShadow:'0 10px 15px -3px rgba(0,0,0,0.1)'}} />
+                <Tooltip formatter={(val: number) => val.toLocaleString() + '千円'} contentStyle={{borderRadius:'12px', border:'none', boxShadow:'0 10px 15px -3px rgba(0,0,0,0.1)'}} />
             </LineChart>
         </ResponsiveContainer>
     ), [stlData]);
@@ -263,7 +273,7 @@ const StoreAnalysisView: React.FC<StoreAnalysisViewProps> = ({ allStores, foreca
                 <Line type="monotone" dataKey="residual" stroke="#EF4444" strokeWidth={2} dot={{r:2}} />
                 <XAxis dataKey="date" hide />
                 <YAxis tick={{fontSize:9}} />
-                <Tooltip formatter={(val: number) => val.toLocaleString()} contentStyle={{borderRadius:'12px', border:'none', boxShadow:'0 10px 15px -3px rgba(0,0,0,0.1)'}} />
+                <Tooltip formatter={(val: number) => val.toLocaleString() + '千円'} contentStyle={{borderRadius:'12px', border:'none', boxShadow:'0 10px 15px -3px rgba(0,0,0,0.1)'}} />
             </LineChart>
         </ResponsiveContainer>
     ), [stlData]);
@@ -275,7 +285,7 @@ const StoreAnalysisView: React.FC<StoreAnalysisViewProps> = ({ allStores, foreca
                 <XAxis dataKey="date" tick={{fontSize:9}} />
                 <YAxis yAxisId="left" tick={{fontSize:9}} />
                 <YAxis yAxisId="right" orientation="right" tick={{fontSize:9}} />
-                <Tooltip formatter={(val: number) => val.toLocaleString()} />
+                <Tooltip formatter={(val: number) => val.toLocaleString() + '千円'} />
                 <Legend />
                 <Bar yAxisId="left" dataKey="monthly" name="月次売上" fill="#93C5FD" barSize={20} />
                 <Line yAxisId="right" type="monotone" dataKey="cumulative" name="累積売上" stroke="#F59E0B" strokeWidth={2} />
@@ -330,7 +340,7 @@ const StoreAnalysisView: React.FC<StoreAnalysisViewProps> = ({ allStores, foreca
                                 </div>
                             </div>
                             <div className="flex gap-8 text-right font-black font-display">
-                                <div><p className="text-[9px] text-gray-400 uppercase mb-1">直近適合精度</p><p className="text-4xl text-[#005EB8] leading-none tracking-tighter">{Math.round(currentStore.stdDev * 0.72).toLocaleString()}</p></div>
+                                <div><p className="text-[9px] text-gray-400 uppercase mb-1">直近適合精度 (StdDev)</p><p className="text-4xl text-[#005EB8] leading-none tracking-tighter">{Math.round(currentStore.stdDev).toLocaleString()}<span className="text-xs ml-1 text-gray-400">千円</span></p></div>
                                 <div><p className="text-[9px] text-gray-400 uppercase mb-1">ABC Rank</p><p className={`text-4xl leading-none tracking-tighter ${currentStore.stats?.abcRank === 'A' ? 'text-yellow-400' : 'text-gray-400'}`}>{currentStore.stats?.abcRank || '-'}</p></div>
                             </div>
                         </div>
@@ -404,8 +414,8 @@ const StoreAnalysisView: React.FC<StoreAnalysisViewProps> = ({ allStores, foreca
                                     </div>
                                     <div className="grid grid-cols-4 gap-4 pt-8 border-t border-dashed border-gray-100 mt-4 text-center font-black font-display">
                                         <div><p className="text-[9px] font-black text-gray-400 uppercase mb-1">成長速度 (k)</p><p className="text-xl text-orange-500">{currentStore.params.k.toFixed(3)}</p></div>
-                                        <div><p className="text-[9px] font-black text-gray-400 uppercase mb-1">潜在需要 (L)</p><p className="text-xl text-[#005EB8]">{Math.round(currentStore.params.L).toLocaleString()}</p></div>
-                                        <div><p className="text-[9px] font-black text-gray-400 uppercase mb-1">残差標準偏差</p><p className="text-xl font-black text-gray-600">{Math.round(currentStore.stdDev).toLocaleString()}</p></div>
+                                        <div><p className="text-[9px] font-black text-gray-400 uppercase mb-1">潜在需要 (L)</p><p className="text-xl text-[#005EB8]">{Math.round(currentStore.params.L).toLocaleString()}<span className="text-xs text-gray-400 ml-1">千円</span></p></div>
+                                        <div><p className="text-[9px] font-black text-gray-400 uppercase mb-1">残差標準偏差</p><p className="text-xl font-black text-gray-600">{Math.round(currentStore.stdDev).toLocaleString()}<span className="text-xs text-gray-400 ml-1">千円</span></p></div>
                                         <div><p className="text-[9px] font-black text-gray-400 uppercase mb-1">年平均成長率</p><p className="text-xl font-black text-green-500">{(currentStore.stats?.cagr ? currentStore.stats.cagr * 100 : 0).toFixed(1)}%</p></div>
                                     </div>
                                 </div>
