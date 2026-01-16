@@ -9,17 +9,22 @@ interface DataViewProps {
     setGlobalMaxDate: (date: Date) => void;
     forecastMonths: number;
     setForecastMonths: (months: number) => void;
+    dataType: 'sales' | 'customers';
+    setDataType: (type: 'sales' | 'customers') => void;
     onComplete: () => void;
 }
 
 interface RawDataPoint {
+    region: string;
+    prefecture: string;
+    block: string;
     storeName: string;
     date: Date;
     dateStr: string;
     value: number;
 }
 
-const DataView: React.FC<DataViewProps> = ({ setAllStores, setGlobalMaxDate, forecastMonths, setForecastMonths, onComplete }) => {
+const DataView: React.FC<DataViewProps> = ({ setAllStores, setGlobalMaxDate, forecastMonths, setForecastMonths, dataType, setDataType, onComplete }) => {
     const [dragActive, setDragActive] = useState(false);
     const [file, setFile] = useState<File | null>(null);
     const [fileName, setFileName] = useState<string>("");
@@ -70,13 +75,36 @@ const DataView: React.FC<DataViewProps> = ({ setAllStores, setGlobalMaxDate, for
                     
                     // 2. Normalize and Collect Data
                     results.data.forEach((row: any) => {
-                        // Ensure row has at least 3 columns
-                        if (row.length < 3) return;
+                        if (row.length < 3) return; // Min requirement check
                         
-                        // Flexible column mapping: Assume Name=0, Date=1, Value=2
-                        const name = String(row[0]).trim();
-                        const dateStr = String(row[1]).trim();
-                        const valStr = String(row[2]).trim();
+                        let region = "Unknown";
+                        let prefecture = "Unknown";
+                        let block = "Unknown";
+                        let name = "";
+                        let dateStr = "";
+                        let valStr = "";
+
+                        // Handle 6 columns (Region, Pref, Block, Name, Date, Value)
+                        // Fallback to legacy formats if needed
+                        if (row.length >= 6) {
+                            region = String(row[0]).trim();
+                            prefecture = String(row[1]).trim();
+                            block = String(row[2]).trim();
+                            name = String(row[3]).trim();
+                            dateStr = String(row[4]).trim();
+                            valStr = String(row[5]).trim();
+                        } else if (row.length >= 4) {
+                            // Legacy: Block, Name, Date, Value
+                            block = String(row[0]).trim();
+                            name = String(row[1]).trim();
+                            dateStr = String(row[2]).trim();
+                            valStr = String(row[3]).trim();
+                        } else {
+                            // Legacy: Name, Date, Value
+                            name = String(row[0]).trim();
+                            dateStr = String(row[1]).trim();
+                            valStr = String(row[2]).trim();
+                        }
                         
                         if (!name || !dateStr) return;
 
@@ -99,7 +127,7 @@ const DataView: React.FC<DataViewProps> = ({ setAllStores, setGlobalMaxDate, for
                         const value = parseFloat(cleanValStr);
 
                         if (name && !isNaN(dateObj.getTime()) && !isNaN(value)) {
-                            rawData.push({ storeName: name, date: dateObj, dateStr: cleanDateStr, value });
+                            rawData.push({ region, prefecture, block, storeName: name, date: dateObj, dateStr: cleanDateStr, value });
                             if (dateObj > globalMaxDate) globalMaxDate = dateObj;
                         }
                     });
@@ -115,96 +143,85 @@ const DataView: React.FC<DataViewProps> = ({ setAllStores, setGlobalMaxDate, for
                     });
 
                     const stores: { [name: string]: StoreData } = {};
-                    const matureStores: StoreData[] = [];
-                    const startupNames: string[] = [];
+                    
+                    // Classify Stores for Processing Order
+                    const anchorNames: string[] = []; // >= 36 months (Mature)
+                    const growthNames: string[] = []; // 12-35 months (Growth)
+                    const startupNames: string[] = []; // < 12 months (Startup)
                     
                     const storeNames = Array.from(storeMap.keys());
-                    const totalStores = storeNames.length;
+                    const tempStoreData: Record<string, {raw: number[], dates: string[], block: string, region: string, prefecture: string}> = {};
 
-                    // Processing loop
-                    for (let i = 0; i < totalStores; i++) {
-                        const name = storeNames[i];
+                    // Pre-processing loop: Sort, Fill Gaps, Classify
+                    storeNames.forEach(name => {
                         let points = storeMap.get(name) || [];
-                        
-                        // Critical: SORT by Date
                         points.sort((a, b) => a.date.getTime() - b.date.getTime());
+                        
+                        // Capture metadata from the first data point
+                        const block = points.length > 0 ? points[0].block : "Unknown";
+                        const region = points.length > 0 ? points[0].region : "Unknown";
+                        const prefecture = points.length > 0 ? points[0].prefecture : "Unknown";
 
-                        // Critical: Fill Time Gaps (Ensure strictly 1 month interval)
-                        // If gap > 1 month, insert 0s.
                         const filledRaw: number[] = [];
                         const filledDates: string[] = [];
                         
                         if (points.length > 0) {
-                            let currentDate = new Date(points[0].date); // Start from first data point
-                            
-                            // Map existing data for quick lookup
+                            let currentDate = new Date(points[0].date); 
                             const lookup = new Map<string, number>();
                             points.forEach(p => {
                                 const k = `${p.date.getFullYear()}-${p.date.getMonth()}`;
                                 lookup.set(k, p.value);
                             });
-
                             const lastDate = points[points.length - 1].date;
                             
-                            // Iterate month by month
                             while (currentDate <= lastDate) {
                                 const k = `${currentDate.getFullYear()}-${currentDate.getMonth()}`;
                                 const val = lookup.get(k);
+                                filledRaw.push(val !== undefined ? val : 0);
                                 
-                                if (val !== undefined) {
-                                    filledRaw.push(val);
-                                } else {
-                                    // Missing month -> Fill 0
-                                    filledRaw.push(0);
-                                }
-                                
-                                // Format date string for display (YYYY-MM)
                                 const y = currentDate.getFullYear();
                                 const m = currentDate.getMonth() + 1;
                                 filledDates.push(`${y}-${String(m).padStart(2, '0')}`);
-
-                                // Next month
                                 currentDate.setMonth(currentDate.getMonth() + 1);
                             }
                         }
 
-                        // Determine if we should analyze now or later (for startups)
-                        // Filter 0s for count check (assuming 0 is "no sales" or "closed")
+                        // Save prepared data
+                        tempStoreData[name] = { raw: filledRaw, dates: filledDates, block, region, prefecture };
+
+                        // Classify based on valid data length
                         const validLen = filledRaw.filter(v => v > 0).length;
+                        if (validLen >= 36) anchorNames.push(name);
+                        else if (validLen >= 12) growthNames.push(name);
+                        else startupNames.push(name);
+                    });
 
-                        if (validLen >= 12) {
-                            try {
-                                const res = analyzeStore(name, filledRaw, filledDates, globalMaxDate);
-                                stores[name] = res;
-                                if (!res.error && res.isActive) matureStores.push(res);
-                            } catch (e) { console.error(e); }
-                        } else {
-                            // Store potentially sparse/short data for startup analysis
-                            // We pass filled data to preserve time axis
-                            stores[name] = { 
-                                name, raw: filledRaw, dates: filledDates, mask: filledRaw.map(v=>v>0), isActive: false, 
-                                nudge:0, nudgeDecay:0, seasonal:[], components:{t:[],s:[],r:[]}, 
-                                params:{L:0,k:0,t0:0}, fit:{params:[],mode:'startup',shockIdx:0,aic:0}, 
-                                stdDev:0, cv:{logistic:0}, error: true, msg: "Pending Global Stats" 
-                            };
-                            startupNames.push(name);
-                        }
-
-                        // Progress 40% -> 70%
+                    // --- STEP 4: Analyze ANCHOR Stores (Mature) ---
+                    const matureStores: StoreData[] = [];
+                    for (let i = 0; i < anchorNames.length; i++) {
+                        const n = anchorNames[i];
+                        const d = tempStoreData[n];
+                        try {
+                            // First pass without global stats (they ARE the stats)
+                            const res = analyzeStore(n, d.raw, d.dates, globalMaxDate, undefined, d.block, d.region, d.prefecture);
+                            stores[n] = res;
+                            if (!res.error && res.isActive) matureStores.push(res);
+                        } catch (e) { console.error(e); }
+                        
                         if (i % 20 === 0) {
-                            setProgress(40 + Math.round((i / totalStores) * 30));
+                            setProgress(40 + Math.round((i / anchorNames.length) * 20));
                             await new Promise(r => setTimeout(r, 0));
                         }
                     }
 
-                    // 4. Calculate Global Stats
+                    // --- STEP 5: Calculate Global Stats ---
                     let globalK = 0.1;
                     const globalSeasonality: number[][] = Array.from({length:12}, () => []);
 
                     if (matureStores.length > 0) {
                         const ks = matureStores.map(s => s.params.k).sort((a,b) => a-b);
-                        const idx75 = Math.min(ks.length - 1, Math.floor(ks.length * 0.75));
-                        globalK = ks[idx75];
+                        const idx50 = Math.floor(ks.length * 0.5); // Median
+                        globalK = ks[idx50];
                         
                         matureStores.forEach(s => {
                            s.seasonal.forEach((val, monthIdx) => {
@@ -216,8 +233,8 @@ const DataView: React.FC<DataViewProps> = ({ setAllStores, setGlobalMaxDate, for
                     let finalGlobalSeasonality = globalSeasonality.map(arr => {
                         if (arr.length === 0) return 1.0;
                         arr.sort((a,b) => a-b);
-                        const idx75 = Math.min(arr.length - 1, Math.floor(arr.length * 0.75));
-                        return arr[idx75];
+                        const idx50 = Math.floor(arr.length * 0.5); // Median
+                        return arr[idx50];
                     });
                     
                     const seaSum = finalGlobalSeasonality.reduce((a, b) => a + b, 0);
@@ -228,22 +245,39 @@ const DataView: React.FC<DataViewProps> = ({ setAllStores, setGlobalMaxDate, for
                         medianSeasonality: finalGlobalSeasonality
                     };
 
-                    // 5. Analyze Startups
-                    for (let i = 0; i < startupNames.length; i++) {
-                        const n = startupNames[i];
-                        const placeholder = stores[n];
+                    // --- STEP 6: Analyze GROWTH Stores (12-35 mo) with Constraints ---
+                    for (let i = 0; i < growthNames.length; i++) {
+                        const n = growthNames[i];
+                        const d = tempStoreData[n];
                         try {
-                            const res = analyzeStore(n, placeholder.raw, placeholder.dates, globalMaxDate, globalStats);
+                            // Pass global stats to enforce tight bounds on K
+                            const res = analyzeStore(n, d.raw, d.dates, globalMaxDate, globalStats, d.block, d.region, d.prefecture);
                             stores[n] = res;
                         } catch (e) { console.error(e); }
                         
                         if (i % 10 === 0) {
-                            setProgress(70 + Math.round((i / startupNames.length) * 30));
+                            setProgress(60 + Math.round((i / growthNames.length) * 20));
                             await new Promise(r => setTimeout(r, 0));
                         }
                     }
 
-                    // 6. Finalize
+                    // --- STEP 7: Analyze STARTUP Stores (< 12 mo) with Fixed K ---
+                    for (let i = 0; i < startupNames.length; i++) {
+                        const n = startupNames[i];
+                        const d = tempStoreData[n];
+                        try {
+                            // Pass global stats to fix K
+                            const res = analyzeStore(n, d.raw, d.dates, globalMaxDate, globalStats, d.block, d.region, d.prefecture);
+                            stores[n] = res;
+                        } catch (e) { console.error(e); }
+                        
+                        if (i % 10 === 0) {
+                            setProgress(80 + Math.round((i / startupNames.length) * 20));
+                            await new Promise(r => setTimeout(r, 0));
+                        }
+                    }
+
+                    // 8. Finalize
                     calculateGlobalABC(Object.values(stores));
                     setAllStores(stores);
                     setStats({ rows: results.data.length, stores: Object.keys(stores).length });
@@ -292,10 +326,29 @@ const DataView: React.FC<DataViewProps> = ({ setAllStores, setGlobalMaxDate, for
                             {file ? (
                                 <span className="text-green-600">自動ソート・欠損月補完機能が有効です</span>
                             ) : (
-                                '必須カラム: 店舗名, 年月(YYYY/MM), 売上実績'
+                                '必須カラム(6列): 地方, 都道府県, Block, 店舗名, 年月, 実績'
                             )}
                         </p>
-                        <div className="mt-8 flex justify-center gap-8 text-xs text-gray-500 font-bold uppercase" onClick={(e) => e.stopPropagation()}>
+                        
+                        {/* Data Type Selector */}
+                        <div className="mt-8 flex justify-center gap-4" onClick={(e) => e.stopPropagation()}>
+                            <div className="bg-white border border-gray-200 rounded-lg p-1 flex shadow-sm">
+                                <button
+                                    onClick={() => setDataType('sales')}
+                                    className={`px-4 py-2 rounded-md text-xs font-black transition-all ${dataType === 'sales' ? 'bg-[#005EB8] text-white shadow' : 'text-gray-400 hover:bg-gray-50'}`}
+                                >
+                                    売上データ (円)
+                                </button>
+                                <button
+                                    onClick={() => setDataType('customers')}
+                                    className={`px-4 py-2 rounded-md text-xs font-black transition-all ${dataType === 'customers' ? 'bg-[#005EB8] text-white shadow' : 'text-gray-400 hover:bg-gray-50'}`}
+                                >
+                                    来店客数データ (人)
+                                </button>
+                            </div>
+                        </div>
+
+                        <div className="mt-4 flex justify-center gap-8 text-xs text-gray-500 font-bold uppercase" onClick={(e) => e.stopPropagation()}>
                             <label className="flex items-center gap-2 cursor-pointer hover:text-[#005EB8]">
                                 <input type="radio" name="encoding" value="UTF-8" checked={encoding === 'UTF-8'} onChange={() => setEncoding('UTF-8')} className="accent-[#005EB8]" /> UTF-8
                             </label>
@@ -319,7 +372,7 @@ const DataView: React.FC<DataViewProps> = ({ setAllStores, setGlobalMaxDate, for
                 </div>
 
                 <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-8">
-                    <h3 className="text-xs font-black text-gray-400 uppercase tracking-[0.3em] mb-6 font-display">2. 分析実行エンジン (v10.9)</h3>
+                    <h3 className="text-xs font-black text-gray-400 uppercase tracking-[0.3em] mb-6 font-display">2. 分析実行エンジン (v11.1)</h3>
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-10">
                         <div>
                             <label className="text-[10px] font-black text-gray-500 uppercase block mb-4 font-display">将来予測期間 (月数)</label>
@@ -332,8 +385,8 @@ const DataView: React.FC<DataViewProps> = ({ setAllStores, setGlobalMaxDate, for
                                 <span className="text-lg font-black text-[#005EB8] w-20 text-right font-display">{forecastMonths}ヶ月</span>
                             </div>
                             <p className="text-[10px] text-gray-400 mt-4 leading-relaxed">
-                                ※ ロジスティック回帰モデル(上限5.0倍/初期値1.5倍)に基づき、<br/>
-                                店舗ごとの成長ポテンシャルと季節性を考慮した予測を行います。
+                                ※ ロジスティック回帰モデル(Base + Growth)に基づき予測を行います。<br/>
+                                <span className="text-green-600 font-bold">New:</span> 3年未満の店舗は全社平均成長率を参照して補正します。
                             </p>
                         </div>
                         <div className="flex flex-col items-end justify-end">
@@ -355,7 +408,13 @@ const DataView: React.FC<DataViewProps> = ({ setAllStores, setGlobalMaxDate, for
                                             <div className="absolute top-0 left-0 right-0 bottom-0 bg-white/20 animate-pulse"></div>
                                         </div>
                                     </div>
-                                    <p className="text-[10px] text-gray-400 mt-2 font-black uppercase italic text-right">Step {progress < 20 ? '1: Parsing' : progress < 40 ? '2: Normalizing' : progress < 70 ? '3: Modeling' : '4: Finalizing'}... {progress}%</p>
+                                    <p className="text-[10px] text-gray-400 mt-2 font-black uppercase italic text-right">
+                                        {progress < 20 ? 'Parsing...' : 
+                                         progress < 40 ? 'Preprocessing...' : 
+                                         progress < 60 ? 'Anchoring (Mature Stores)...' : 
+                                         progress < 80 ? 'Refining (Growth Stores)...' : 
+                                         'Finalizing (Startups)...'} {progress}%
+                                    </p>
                                 </div>
                             )}
                         </div>

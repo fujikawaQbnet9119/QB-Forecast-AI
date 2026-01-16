@@ -13,13 +13,17 @@ import {
 interface StoreAnalysisViewProps {
     allStores: { [name: string]: StoreData };
     forecastMonths: number;
+    dataType: 'sales' | 'customers';
 }
 
-const StoreAnalysisView: React.FC<StoreAnalysisViewProps> = ({ allStores, forecastMonths }) => {
+const StoreAnalysisView: React.FC<StoreAnalysisViewProps> = ({ allStores, forecastMonths, dataType }) => {
     const [selectedStore, setSelectedStore] = useState<string | null>(null);
     const [searchTerm, setSearchTerm] = useState("");
-    const [showClosed, setShowClosed] = useState(false); // Default: Hide closed stores
-    const [activeTab, setActiveTab] = useState<'main' | 'stl' | 'zchart' | 'heatmap' | 'model'>('main');
+    const [showClosed, setShowClosed] = useState(false);
+    const [showGrowthOnly, setShowGrowthOnly] = useState(false); // New State
+    
+    const [activeTab, setActiveTab] = useState<string>('forecast');
+    
     const [confidence, setConfidence] = useState(95);
     const [aiReport, setAiReport] = useState<string | null>(null);
     const [aiLoading, setAiLoading] = useState(false);
@@ -31,14 +35,19 @@ const StoreAnalysisView: React.FC<StoreAnalysisViewProps> = ({ allStores, foreca
     const [simK, setSimK] = useState(1.0); // Multiplier for k
 
     const storeNames = Object.keys(allStores).sort();
+    const isSales = dataType === 'sales';
+    const unitLabel = isSales ? '売上 (千円)' : '客数 (人)';
+    const valueFormatter = (val: number) => val.toLocaleString() + (isSales ? '千円' : '人');
     
     const filteredStores = useMemo(() => {
         return storeNames.filter(n => {
+            const store = allStores[n];
             const matchesSearch = n.toLowerCase().includes(searchTerm.toLowerCase());
-            const matchesStatus = showClosed ? true : allStores[n].isActive;
-            return matchesSearch && matchesStatus;
+            const matchesStatus = showClosed ? true : store.isActive;
+            const matchesGrowth = showGrowthOnly ? store.raw.length < 36 : true; // New Filter Logic
+            return matchesSearch && matchesStatus && matchesGrowth;
         });
-    }, [storeNames, searchTerm, showClosed, allStores]);
+    }, [storeNames, searchTerm, showClosed, showGrowthOnly, allStores]);
 
     const currentStore = selectedStore ? allStores[selectedStore] : null;
 
@@ -63,13 +72,10 @@ const StoreAnalysisView: React.FC<StoreAnalysisViewProps> = ({ allStores, foreca
 
         // Historical
         d.dates.forEach((date, i) => {
-            // FIX: Show raw data even if masked (excluded from fit).
-            // We use 'actual' for the connected line (all data).
-            // We use 'outlier' to highlight points that were excluded from the model.
             data.push({
                 date,
-                actual: d.raw[i], // Always show the raw data
-                outlier: !d.mask[i] ? d.raw[i] : null, // Only populated if masked out
+                actual: d.raw[i],
+                outlier: !d.mask[i] ? d.raw[i] : null,
                 forecast: null,
                 range: null,
                 simulated: null
@@ -95,10 +101,9 @@ const StoreAnalysisView: React.FC<StoreAnalysisViewProps> = ({ allStores, foreca
             const upper = Math.max(0, baseVal + z * unc);
             const lower = Math.max(0, baseVal - z * unc);
 
-            // Simulation Forecast (Gradual Transition)
+            // Simulation Forecast
             let simVal: number | null = null;
             if (simMode) {
-                // 1. Calculate Target Value with Modified Params
                 const simParams = { ...d.fit.params };
                 if (d.fit.mode === 'shift' || d.fit.mode === 'recovery') {
                     simParams.L_post *= simL;
@@ -111,15 +116,10 @@ const StoreAnalysisView: React.FC<StoreAnalysisViewProps> = ({ allStores, foreca
                 let targetVal = (trSim * (d.seasonal[fd.getMonth()] || 1.0)) + (d.nudge * Math.pow(decay, t));
                 if (targetVal < 0) targetVal = 0;
 
-                // 2. Interpolate from Base to Target over 24 months
                 const transitionMonths = 24;
                 const progress = Math.min(t / transitionMonths, 1.0);
                 
-                // Linear interpolation:
-                // t=0 (current) -> 0% change
-                // t=24 (2 years) -> 100% change (Full Target)
                 simVal = baseVal + (targetVal - baseVal) * progress;
-                
                 if (simVal < 0) simVal = 0;
             }
 
@@ -148,24 +148,20 @@ const StoreAnalysisView: React.FC<StoreAnalysisViewProps> = ({ allStores, foreca
     const zChartData = useMemo(() => {
         if (!currentStore || !currentStore.stats?.zChart) return [];
         
-        // Z-Chart must show exactly the last 12 months to form the 'Z' shape
         const len = currentStore.dates.length;
-        if (len < 12) return []; // Not enough data for Z-Chart
+        if (len < 12) return [];
 
         const start = len - 12;
         const slicedRaw = currentStore.stats.zChart.slice(start);
         const slicedDates = currentStore.dates.slice(start);
 
-        // Calculate Cumulative Sales STARTING from the first month of this 12-month window
-        // This is crucial for the diagonal line of the Z-chart
         let runningTotal = 0;
-        
         return slicedRaw.map((d, i) => {
             runningTotal += d.monthly;
             return {
                 date: slicedDates[i],
                 monthly: d.monthly,
-                cumulative: runningTotal, // Starts at month 1 value, ends at MAT value
+                cumulative: runningTotal,
                 mat: d.mat
             };
         });
@@ -180,7 +176,6 @@ const StoreAnalysisView: React.FC<StoreAnalysisViewProps> = ({ allStores, foreca
         let maxVal = 0;
 
         currentStore.dates.forEach((d, i) => {
-            // FIX: Use ALL data for heatmap, not just masked ones
             const dateObj = new Date(d.replace(/\//g, '-'));
             if(isNaN(dateObj.getTime())) return;
             const y = dateObj.getFullYear();
@@ -200,10 +195,8 @@ const StoreAnalysisView: React.FC<StoreAnalysisViewProps> = ({ allStores, foreca
         return { grid, maxVal };
     }, [currentStore]);
 
-    // --- Similar Store Logic ---
     const similarStores = useMemo(() => {
         if (!currentStore) return [];
-        
         const targetK = currentStore.params.k;
         const targetSea = currentStore.seasonal;
 
@@ -240,26 +233,23 @@ const StoreAnalysisView: React.FC<StoreAnalysisViewProps> = ({ allStores, foreca
         </button>
     );
 
-    // --- Chart Renderers ---
     const renderMainChart = useCallback(() => (
         <ResponsiveContainer width="100%" height="100%">
             <ComposedChart data={chartData} margin={{top:5, right:10, bottom:0, left:0}}>
                 <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9"/>
                 <XAxis dataKey="date" tick={{fontSize:9}} minTickGap={30} tickMargin={10} />
-                <YAxis tick={{fontSize:9}} label={{ value: '売上 (千円)', angle: -90, position: 'left', offset: 0, fontSize: 9 }} />
-                <Tooltip formatter={(val: number) => val.toLocaleString() + '千円'} labelStyle={{color:'black'}} contentStyle={{borderRadius:'16px', border:'none', boxShadow:'0 10px 15px -3px rgba(0,0,0,0.1)'}} />
+                <YAxis tick={{fontSize:9}} label={{ value: unitLabel, angle: -90, position: 'left', offset: 0, fontSize: 9 }} />
+                <Tooltip formatter={valueFormatter} labelStyle={{color:'black'}} contentStyle={{borderRadius:'16px', border:'none', boxShadow:'0 10px 15px -3px rgba(0,0,0,0.1)'}} />
                 <Legend wrapperStyle={{ fontSize: '9px', paddingTop: '10px' }} iconSize={8} />
                 {!simMode && <Area type="monotone" dataKey="range" fill="#005EB8" fillOpacity={0.1} stroke="transparent" name="信頼区間" />}
                 <Line type="monotone" dataKey="forecast" stroke="#005EB8" strokeWidth={3} strokeDasharray={simMode ? "3 3" : "0"} dot={false} name="AI予測 (Base)" strokeOpacity={simMode ? 0.5 : 1} />
                 {simMode && <Line type="monotone" dataKey="simulated" stroke="#9333EA" strokeWidth={3} dot={false} name="Simulation (24mo Adjust)" animationDuration={300} />}
-                {/* Main Data Line */}
                 <Line type="monotone" dataKey="actual" stroke="#1A1A1A" strokeWidth={2} dot={{r:2, fill:'#1A1A1A'}} name="実績" />
-                {/* Outliers - Red Dots for masked/excluded data */}
                 <Scatter dataKey="outlier" fill="#EF4444" name="外れ値 (除外)" shape="cross" />
                 <Brush dataKey="date" height={20} stroke="#cbd5e1" fill="#f8fafc" />
             </ComposedChart>
         </ResponsiveContainer>
-    ), [chartData, simMode]);
+    ), [chartData, simMode, unitLabel, valueFormatter]);
 
     const renderStlTrend = useCallback(() => (
         <ResponsiveContainer width="100%" height="100%">
@@ -267,10 +257,10 @@ const StoreAnalysisView: React.FC<StoreAnalysisViewProps> = ({ allStores, foreca
                 <Line type="monotone" dataKey="trend" stroke="#F59E0B" strokeWidth={3} dot={false} />
                 <XAxis dataKey="date" hide />
                 <YAxis domain={['auto', 'auto']} hide />
-                <Tooltip formatter={(val: number) => val.toLocaleString() + '千円'} contentStyle={{borderRadius:'12px', border:'none', boxShadow:'0 10px 15px -3px rgba(0,0,0,0.1)'}} />
+                <Tooltip formatter={valueFormatter} contentStyle={{borderRadius:'12px', border:'none', boxShadow:'0 10px 15px -3px rgba(0,0,0,0.1)'}} />
             </LineChart>
         </ResponsiveContainer>
-    ), [stlData]);
+    ), [stlData, valueFormatter]);
 
     const renderStlSeasonal = useCallback(() => (
         <ResponsiveContainer width="100%" height="100%">
@@ -290,10 +280,10 @@ const StoreAnalysisView: React.FC<StoreAnalysisViewProps> = ({ allStores, foreca
                 <Line type="monotone" dataKey="residual" stroke="#EF4444" strokeWidth={2} dot={{r:2}} />
                 <XAxis dataKey="date" hide />
                 <YAxis tick={{fontSize:9}} />
-                <Tooltip formatter={(val: number) => val.toLocaleString() + '千円'} contentStyle={{borderRadius:'12px', border:'none', boxShadow:'0 10px 15px -3px rgba(0,0,0,0.1)'}} />
+                <Tooltip formatter={valueFormatter} contentStyle={{borderRadius:'12px', border:'none', boxShadow:'0 10px 15px -3px rgba(0,0,0,0.1)'}} />
             </LineChart>
         </ResponsiveContainer>
-    ), [stlData]);
+    ), [stlData, valueFormatter]);
 
     const renderZChart = useCallback(() => (
         <ResponsiveContainer width="100%" height="100%">
@@ -302,15 +292,16 @@ const StoreAnalysisView: React.FC<StoreAnalysisViewProps> = ({ allStores, foreca
                 <XAxis dataKey="date" tick={{fontSize:9}} />
                 <YAxis yAxisId="left" tick={{fontSize:9}} />
                 <YAxis yAxisId="right" orientation="right" tick={{fontSize:9}} />
-                <Tooltip formatter={(val: number) => val.toLocaleString() + '千円'} />
+                <Tooltip formatter={valueFormatter} />
                 <Legend />
-                <Bar yAxisId="left" dataKey="monthly" name="月次売上" fill="#93C5FD" barSize={20} />
-                <Line yAxisId="right" type="monotone" dataKey="cumulative" name="累積売上" stroke="#F59E0B" strokeWidth={2} />
+                <Bar yAxisId="left" dataKey="monthly" name={`月次${isSales ? '売上' : '客数'}`} fill="#93C5FD" barSize={20} />
+                <Line yAxisId="right" type="monotone" dataKey="cumulative" name="累積" stroke="#F59E0B" strokeWidth={2} />
                 <Line yAxisId="left" type="monotone" dataKey="mat" name="移動年計 (MAT)" stroke="#005EB8" strokeWidth={3} />
             </ComposedChart>
         </ResponsiveContainer>
-    ), [zChartData]);
+    ), [zChartData, valueFormatter, isSales]);
 
+    const tabClass = (tab: string) => `px-6 py-3 rounded-full text-xs font-black transition-all font-display ${activeTab === tab ? 'bg-[#005EB8] text-white shadow-lg shadow-blue-200 transform scale-105' : 'bg-white text-gray-400 hover:bg-gray-50'}`;
 
     return (
         <div className="absolute inset-0 flex flex-col lg:flex-row gap-6 p-4 md:p-8 animate-fadeIn bg-[#F8FAFC]">
@@ -324,15 +315,27 @@ const StoreAnalysisView: React.FC<StoreAnalysisViewProps> = ({ allStores, foreca
                         value={searchTerm}
                         onChange={(e) => setSearchTerm(e.target.value)}
                     />
-                    <label className="flex items-center gap-2 mt-4 cursor-pointer select-none group">
-                        <input 
-                            type="checkbox" 
-                            checked={showClosed} 
-                            onChange={(e) => setShowClosed(e.target.checked)}
-                            className="w-4 h-4 accent-[#005EB8] rounded border-gray-300 focus:ring-[#005EB8] cursor-pointer"
-                        />
-                        <span className="text-xs font-bold text-gray-500 group-hover:text-[#005EB8] transition-colors">閉店・非稼働店舗を含める</span>
-                    </label>
+                    <div className="mt-4 space-y-2">
+                        <label className="flex items-center gap-2 cursor-pointer select-none group">
+                            <input 
+                                type="checkbox" 
+                                checked={showClosed} 
+                                onChange={(e) => setShowClosed(e.target.checked)}
+                                className="w-4 h-4 accent-[#005EB8] rounded border-gray-300 focus:ring-[#005EB8] cursor-pointer"
+                            />
+                            <span className="text-xs font-bold text-gray-500 group-hover:text-[#005EB8] transition-colors">閉店・非稼働店舗を含める</span>
+                        </label>
+                        
+                        <label className="flex items-center gap-2 cursor-pointer select-none group">
+                            <input 
+                                type="checkbox" 
+                                checked={showGrowthOnly} 
+                                onChange={(e) => setShowGrowthOnly(e.target.checked)}
+                                className="w-4 h-4 accent-orange-500 rounded border-gray-300 focus:ring-orange-500 cursor-pointer"
+                            />
+                            <span className="text-xs font-bold text-gray-500 group-hover:text-orange-500 transition-colors">成長期のみ (36ヶ月未満)</span>
+                        </label>
+                    </div>
                 </div>
                 <div className="flex-1 overflow-y-auto p-3 space-y-1">
                     {filteredStores.map(n => (
@@ -356,240 +359,227 @@ const StoreAnalysisView: React.FC<StoreAnalysisViewProps> = ({ allStores, foreca
             </div>
 
             {/* Main Content */}
-            <div className="lg:w-3/4 flex flex-col gap-6 h-full overflow-y-auto pr-2">
+            <div className="lg:w-3/4 flex flex-col gap-6 h-full overflow-y-auto pr-2 pb-20">
                 {currentStore ? (
                     <>
-                        {/* Header */}
-                        <div className="bg-white rounded-3xl shadow-sm border border-gray-100 p-8 flex justify-between items-center flex-shrink-0">
-                            <div>
-                                <h2 className="text-3xl font-black text-gray-800 uppercase tracking-tight font-display">{currentStore.name}</h2>
-                                <div className="flex gap-2 mt-2">
-                                    {!currentStore.isActive && <span className="bg-gray-100 text-gray-500 px-3 py-1 rounded-full text-[10px] font-black uppercase">非稼働 (Inactive)</span>}
-                                    {currentStore.fit.mode === 'shift' && <span className="bg-purple-100 text-purple-700 px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-widest">構造変化 (Shift)</span>}
-                                    {currentStore.fit.mode === 'recovery' && <span className="bg-green-100 text-green-700 px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-widest">回復期 (Recovery)</span>}
-                                    {currentStore.fit.mode === 'startup' && <span className="bg-orange-100 text-orange-700 px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-widest">新規店 (Startup)</span>}
-                                </div>
-                            </div>
-                            <div className="flex gap-8 text-right font-black font-display">
-                                <div><p className="text-[9px] text-gray-400 uppercase mb-1 flex items-center justify-end">直近適合精度 (StdDev)<HelpTooltip title="StdDev (残差標準偏差)" content="AIの予測と実績のズレ（誤差）の大きさです。この数値が小さいほど、予測通りに売上が動く「読みやすい店舗」と言えます。" /></p><p className="text-4xl text-[#005EB8] leading-none tracking-tighter">{Math.round(currentStore.stdDev).toLocaleString()}<span className="text-xs ml-1 text-gray-400">千円</span></p></div>
-                                <div><p className="text-[9px] text-gray-400 uppercase mb-1 flex items-center justify-end">ABC Rank<HelpTooltip title="ABCランク" content="売上高による全社ランキング。A=上位70%、B=次点20%、C=下位10%。" /></p><p className={`text-4xl leading-none tracking-tighter ${currentStore.stats?.abcRank === 'A' ? 'text-yellow-400' : 'text-gray-400'}`}>{currentStore.stats?.abcRank || '-'}</p></div>
-                            </div>
-                        </div>
+                         {/* Header */}
+                         <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+                             <div>
+                                 <h2 className="text-3xl font-black text-gray-800 tracking-tighter uppercase font-display">{currentStore.name}</h2>
+                                 <div className="flex gap-2 mt-2">
+                                     <span className={`px-2 py-0.5 rounded text-[10px] uppercase font-bold ${currentStore.isActive ? 'bg-green-100 text-green-600' : 'bg-gray-100 text-gray-500'}`}>{currentStore.isActive ? 'ACTIVE' : 'CLOSED'}</span>
+                                     <span className="bg-blue-50 text-[#005EB8] px-2 py-0.5 rounded text-[10px] font-bold border border-blue-100">Rank: {currentStore.stats?.abcRank}</span>
+                                     <span className="bg-orange-50 text-orange-600 px-2 py-0.5 rounded text-[10px] font-bold border border-orange-100">Mode: {currentStore.fit.mode}</span>
+                                 </div>
+                             </div>
+                             
+                             {/* Tab Navigation */}
+                             <div className="flex bg-white rounded-full p-1 shadow-sm overflow-x-auto max-w-full">
+                                <button onClick={() => setActiveTab('forecast')} className={tabClass('forecast')}>予測</button>
+                                <button onClick={() => setActiveTab('analysis')} className={tabClass('analysis')}>詳細分析</button>
+                                <button onClick={() => setActiveTab('ai')} className={tabClass('ai')}>AI診断</button>
+                             </div>
+                         </div>
 
-                        {/* Tabs */}
-                        <div className="w-full overflow-x-auto pb-2 flex-shrink-0 relative z-10">
-                            <div className="flex bg-gray-100/50 p-1 rounded-full w-max mx-auto lg:mx-0 whitespace-nowrap">
-                                {['main', 'stl', 'zchart', 'heatmap', 'model'].map(t => (
-                                    <button 
-                                        key={t}
-                                        className={`uppercase text-[10px] font-black py-2 px-6 rounded-full transition-all font-display ${activeTab === t ? 'bg-white text-[#005EB8] shadow-sm' : 'text-gray-400 hover:text-gray-600'}`}
-                                        onClick={() => setActiveTab(t as any)}
-                                    >
-                                        {t === 'main' ? '予測詳細 (FORECAST)' : t === 'stl' ? '要因分解 (DECOMP)' : t === 'zchart' ? 'Zチャート' : t === 'heatmap' ? 'ヒートマップ' : 'モデル診断'}
-                                    </button>
-                                ))}
-                            </div>
-                        </div>
-
-                        {/* Tab Content */}
-                        <div className="bg-white rounded-3xl shadow-sm border border-gray-100 p-5 space-y-6">
-                            {activeTab === 'main' && (
-                                <div className="animate-fadeIn">
-                                    <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 gap-4">
-                                        <div className="flex items-center gap-4">
-                                            <h3 className="font-black text-gray-700 text-[11px] uppercase tracking-[0.2em] font-display flex items-center">
-                                                予測分布 (Prediction Distribution)
-                                                <HelpTooltip title="AI予測分布" content="青い点線がAIによる将来予測、薄い青色の帯が「95%の確率で収まる範囲（信頼区間）」です。実績（黒点）が帯から外れた場合、突発的な要因（キャンペーンや災害など）があったと考えられます。" />
-                                            </h3>
-                                            <button 
-                                                onClick={() => setSimMode(!simMode)} 
-                                                className={`px-4 py-1.5 rounded-full text-[10px] font-black uppercase transition-all flex items-center gap-2 border ${simMode ? 'bg-purple-600 text-white border-purple-600 shadow-md shadow-purple-200' : 'bg-white text-gray-500 border-gray-200 hover:bg-gray-50'}`}
-                                            >
-                                                <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19.428 15.428a2 2 0 00-1.022-.547l-2.384-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z"></path></svg>
-                                                What-If シミュレーション
-                                            </button>
-                                        </div>
-
-                                        {simMode ? (
-                                            <div className="flex flex-wrap items-center gap-4 bg-purple-50 px-4 py-2 rounded-xl border border-purple-100 w-full md:w-auto animate-fadeIn">
-                                                <div className="flex items-center gap-2">
-                                                    <span className="text-[10px] font-black text-purple-700 uppercase">潜在需要 (L)</span>
-                                                    <input 
-                                                        type="range" min="0.8" max="1.5" step="0.05" 
-                                                        value={simL} onChange={(e) => setSimL(parseFloat(e.target.value))} 
-                                                        className="w-24 accent-purple-600" 
-                                                    />
-                                                    <span className="text-xs font-black text-purple-600 w-12 text-right">{Math.round(simL * 100)}%</span>
-                                                </div>
-                                                <div className="w-px h-4 bg-purple-200 hidden md:block"></div>
-                                                <div className="flex items-center gap-2">
-                                                    <span className="text-[10px] font-black text-purple-700 uppercase">成長速度 (k)</span>
-                                                    <input 
-                                                        type="range" min="0.5" max="2.0" step="0.1" 
-                                                        value={simK} onChange={(e) => setSimK(parseFloat(e.target.value))} 
-                                                        className="w-24 accent-purple-600" 
-                                                    />
-                                                    <span className="text-xs font-black text-purple-600 w-12 text-right">{Math.round(simK * 100)}%</span>
-                                                </div>
-                                            </div>
-                                        ) : (
-                                            <div className="flex items-center gap-3 bg-gray-50 px-5 py-2 rounded-full border border-gray-200">
-                                                <span className="text-[10px] font-black text-gray-500 uppercase font-display">信頼区間:</span>
-                                                <input type="range" min="50" max="99" value={confidence} onChange={(e) => setConfidence(parseInt(e.target.value))} className="w-24 accent-[#005EB8]" />
-                                                <span className="text-sm font-black text-[#005EB8] w-10 text-right font-display">{confidence}%</span>
-                                            </div>
-                                        )}
-                                    </div>
-
-                                    <div className="h-[320px] w-full relative group">
-                                        <ExpandButton target="mainForecast" />
-                                        {renderMainChart()}
-                                        {simMode && <div className="absolute top-2 right-14 bg-purple-100 text-purple-800 text-[9px] font-black px-2 py-1 rounded border border-purple-200 animate-pulse">Simulation Active</div>}
-                                    </div>
-                                    <div className="grid grid-cols-4 gap-4 pt-8 border-t border-dashed border-gray-100 mt-4 text-center font-black font-display">
-                                        <div><p className="text-[9px] font-black text-gray-400 uppercase mb-1 flex items-center justify-center">成長速度 (k)<HelpTooltip title="成長速度 (k)" content="店舗の立ち上がりの速さ。0.1以上が標準。低い場合は初期の認知不足の可能性があります。" /></p><p className="text-xl text-orange-500">{currentStore.params.k.toFixed(3)}</p></div>
-                                        <div><p className="text-[9px] font-black text-gray-400 uppercase mb-1 flex items-center justify-center">潜在需要 (L)<HelpTooltip title="潜在需要 (L)" content="この店舗が到達できる売上の理論上の上限値（天井）。現在の売上がこれに近い場合、これ以上伸ばすには改装などが必要です。" /></p><p className="text-xl text-[#005EB8]">{Math.round(currentStore.params.L).toLocaleString()}<span className="text-xs text-gray-400 ml-1">千円</span></p></div>
-                                        <div><p className="text-[9px] font-black text-gray-400 uppercase mb-1 flex items-center justify-center">残差標準偏差</p><p className="text-xl font-black text-gray-600">{Math.round(currentStore.stdDev).toLocaleString()}<span className="text-xs text-gray-400 ml-1">千円</span></p></div>
-                                        <div><p className="text-[9px] font-black text-gray-400 uppercase mb-1 flex items-center justify-center">年平均成長率<HelpTooltip title="CAGR (年平均成長率)" content="直近3年間でならした平均成長率。プラスなら長期的には成長トレンドにあると言えます。" /></p><p className="text-xl font-black text-green-500">{(currentStore.stats?.cagr ? currentStore.stats.cagr * 100 : 0).toFixed(1)}%</p></div>
-                                    </div>
-                                </div>
-                            )}
-
-                            {activeTab === 'stl' && (
-                                <div className="space-y-6 animate-fadeIn">
-                                    <div className="bg-gray-50 rounded-2xl p-4 h-[200px] relative group">
-                                        <ExpandButton target="stlTrend" />
-                                        <h3 className="font-black text-gray-700 text-[10px] uppercase mb-2 font-display flex items-center">
-                                            トレンド要因 (Trend Component)
-                                            <HelpTooltip title="トレンド要因" content="季節性や一時的なノイズを取り除いた、店舗の「真の実力」の推移です。" />
-                                        </h3>
-                                        {renderStlTrend()}
-                                    </div>
-                                    <div className="bg-gray-50 rounded-2xl p-4 h-[200px] relative group">
-                                        <ExpandButton target="stlSeasonal" />
-                                        <h3 className="font-black text-gray-700 text-[10px] uppercase mb-2 font-display flex items-center">
-                                            季節要因 (Seasonal Component)
-                                            <HelpTooltip title="季節要因" content="「毎年決まって起きる売上の波」です。1.0より高い月は書き入れ時、低い月は閑散期です。" />
-                                        </h3>
-                                        {renderStlSeasonal()}
-                                    </div>
-                                    <div className="bg-gray-50 rounded-2xl p-4 h-[200px] relative group">
-                                        <ExpandButton target="stlResidual" />
-                                        <h3 className="font-black text-gray-700 text-[10px] uppercase mb-2 font-display flex items-center">
-                                            不規則変動・残差 (Residual / Irregular)
-                                            <HelpTooltip title="残差 (ノイズ)" content="トレンドでも季節性でも説明できない「突発的な売上変動」です。0から大きく離れている月は何らかのイベントがあったはずです。" />
-                                        </h3>
-                                        {renderStlResidual()}
-                                    </div>
-                                </div>
-                            )}
-
-                            {activeTab === 'zchart' && (
-                                <div className="animate-fadeIn">
-                                    <h3 className="font-black text-gray-700 text-[11px] uppercase tracking-[0.2em] font-display mb-6 flex items-center">
-                                        Zチャート (直近12ヶ月トレンド分析)
-                                        <HelpTooltip title="Zチャート" content="売上の季節変動を無視してトレンドを見るためのチャートです。一番上の青い線（移動年計）が右肩上がりなら、季節に関係なく「実力で成長している」と言えます。" />
+                         {/* --- TAB 1: FORECAST (MAIN) --- */}
+                         {activeTab === 'forecast' && (
+                             <div className="bg-white rounded-3xl shadow-sm border border-gray-100 p-6 flex flex-col h-[600px] min-h-[600px] relative group animate-fadeIn">
+                                 <ExpandButton target="main" />
+                                 <div className="flex justify-between items-center mb-4">
+                                    <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest font-display flex items-center">
+                                        実績 & AI予測 (Logistic Growth)
+                                        <HelpTooltip title="AI予測グラフ" content="過去の実績（黒線）とAIによる将来予測（青線）を表示します。シミュレーションモードをONにすると、L（規模）やk（成長速度）を変更した場合のシナリオを描画できます。" />
                                     </h3>
-                                    <div className="h-[400px] w-full relative group">
-                                        <ExpandButton target="zchart" />
-                                        {renderZChart()}
+                                    <div className="flex items-center gap-4 bg-gray-50 px-3 py-1.5 rounded-full border border-gray-200">
+                                        <label className="flex items-center gap-2 cursor-pointer select-none">
+                                            <input type="checkbox" checked={simMode} onChange={(e) => setSimMode(e.target.checked)} className="accent-[#005EB8]" />
+                                            <span className="text-xs font-bold text-gray-600">Simulation Mode</span>
+                                        </label>
                                     </div>
-                                    <p className="text-xs text-gray-400 mt-4 text-center">※ 移動年計(MAT)が右肩上がりであれば、季節変動を除いても成長トレンドにあると判断できます。</p>
-                                </div>
-                            )}
-
-                            {activeTab === 'heatmap' && (
-                                <div className="animate-fadeIn">
-                                    <h3 className="font-black text-gray-700 text-[11px] uppercase tracking-[0.2em] font-display mb-6">月次売上ヒートマップ</h3>
-                                    <div className="overflow-x-auto">
-                                        <table className="w-full text-center border-collapse">
-                                            <thead>
-                                                <tr>
-                                                    <th className="p-2 text-xs font-black text-gray-400">Year</th>
-                                                    {[...Array(12)].map((_, i) => <th key={i} className="p-2 text-xs font-black text-gray-600">{i + 1}月</th>)}
-                                                </tr>
-                                            </thead>
-                                            <tbody>
-                                                {heatmapData.grid.map(row => (
-                                                    <tr key={row.year}>
-                                                        <td className="p-2 text-xs font-bold text-gray-500">{row.year}</td>
-                                                        {row.months.map((val, i) => {
-                                                            const ratio = val ? val / heatmapData.maxVal : 0;
-                                                            const bg = val ? `rgba(0, 94, 184, ${ratio})` : '#f8fafc';
-                                                            const color = ratio > 0.6 ? 'white' : 'black';
-                                                            return (
-                                                                <td key={i} className="p-1 border border-white">
-                                                                    <div style={{ backgroundColor: bg, color }} className="w-full h-10 flex items-center justify-center text-[10px] font-bold rounded">
-                                                                        {val ? val.toLocaleString() : '-'}
-                                                                    </div>
-                                                                </td>
-                                                            );
-                                                        })}
-                                                    </tr>
-                                                ))}
-                                            </tbody>
-                                        </table>
-                                    </div>
-                                </div>
-                            )}
-
-                            {activeTab === 'model' && (
-                                <div className="animate-fadeIn space-y-8">
-                                    {/* Similar Stores */}
-                                    <div>
-                                        <h3 className="font-black text-gray-700 text-[11px] uppercase tracking-[0.2em] font-display mb-4 flex items-center">
-                                            類似店舗 (Nearest Neighbors)
-                                            <HelpTooltip title="類似店舗" content="成長パターン（カーブの形）や季節変動のクセが似ている店舗をAIが抽出します。これらの店舗の成功事例は、そのままこの店にも使える可能性が高いです。" />
-                                        </h3>
-                                        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                                            {similarStores.map((s, i) => (
-                                                <div key={i} className="bg-white border border-gray-200 p-4 rounded-xl shadow-sm hover:shadow-md transition-all cursor-pointer" onClick={() => setSelectedStore(s.store.name)}>
-                                                    <div className="flex justify-between items-center mb-2">
-                                                        <span className="font-black text-[#005EB8]">{s.store.name}</span>
-                                                        <span className="text-[10px] bg-blue-100 text-blue-800 px-2 py-0.5 rounded">Sim: {((1 - s.distance)*100).toFixed(0)}%</span>
-                                                    </div>
-                                                    <div className="text-[10px] text-gray-500 space-y-1">
-                                                        <p>成長率(k): {s.store.params.k.toFixed(3)} (Diff: {s.kDiff.toFixed(3)})</p>
-                                                        <p>季節相関: {s.corr.toFixed(2)}</p>
-                                                    </div>
+                                 </div>
+                                 
+                                 {simMode && (
+                                    <div className="absolute top-16 right-6 z-10 bg-white/90 p-4 rounded-xl border border-purple-100 shadow-lg w-64 backdrop-blur-sm">
+                                        <h4 className="text-[10px] font-black text-purple-600 uppercase mb-3">Parameter Adjustment</h4>
+                                        <div className="space-y-4">
+                                            <div>
+                                                <div className="flex justify-between text-[10px] font-bold mb-1">
+                                                    <span>Potential (L)</span>
+                                                    <span>x{simL.toFixed(2)}</span>
                                                 </div>
-                                            ))}
-                                        </div>
-                                    </div>
-
-                                    {/* Gemini AI Report */}
-                                    <div className="bg-slate-50 border border-slate-200 rounded-2xl p-6">
-                                        <div className="flex justify-between items-center mb-4">
-                                            <h3 className="font-black text-slate-700 text-[11px] uppercase tracking-[0.2em] font-display">AI 戦略コンサルタント (Gemini 2.5)</h3>
-                                            <button 
-                                                onClick={handleGenerateAI} 
-                                                disabled={aiLoading}
-                                                className="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg text-xs font-bold transition-colors flex items-center gap-2 disabled:opacity-50"
-                                            >
-                                                {aiLoading ? (
-                                                    <svg className="animate-spin h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
-                                                ) : (
-                                                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
-                                                )}
-                                                分析レポート生成
-                                            </button>
-                                        </div>
-                                        
-                                        {aiReport ? (
-                                            <div className="prose prose-sm max-w-none text-slate-700 bg-white p-6 rounded-xl shadow-inner border border-slate-100" dangerouslySetInnerHTML={{ __html: marked(aiReport) }} />
-                                        ) : (
-                                            <div className="text-center py-8 text-slate-400 text-sm">
-                                                「分析レポート生成」ボタンを押すと、AIが店舗データを分析し、<br/>具体的な戦略アドバイスを提供します。
+                                                <input type="range" min="0.5" max="2.0" step="0.05" value={simL} onChange={(e) => setSimL(parseFloat(e.target.value))} className="w-full accent-purple-600 h-1 bg-gray-200 rounded-lg appearance-none cursor-pointer" />
                                             </div>
-                                        )}
+                                            <div>
+                                                <div className="flex justify-between text-[10px] font-bold mb-1">
+                                                    <span>Growth (k)</span>
+                                                    <span>x{simK.toFixed(2)}</span>
+                                                </div>
+                                                <input type="range" min="0.5" max="2.0" step="0.05" value={simK} onChange={(e) => setSimK(parseFloat(e.target.value))} className="w-full accent-purple-600 h-1 bg-gray-200 rounded-lg appearance-none cursor-pointer" />
+                                            </div>
+                                        </div>
                                     </div>
-                                </div>
-                            )}
-                        </div>
+                                 )}
+
+                                 <div className="flex-1 w-full">
+                                     {renderMainChart()}
+                                 </div>
+                             </div>
+                         )}
+
+                         {/* --- TAB 2: ANALYSIS (Combined) --- */}
+                         {activeTab === 'analysis' && (
+                             <div className="space-y-8 animate-fadeIn">
+                                 {/* Section 1: Decomposition */}
+                                 <div>
+                                     <h3 className="text-lg font-black text-slate-800 border-b pb-2 mb-4 font-display flex items-center gap-2">
+                                         1. 要因分解 (Factor Decomposition)
+                                         <HelpTooltip title="要因分解" content="売上の変動要因を「トレンド」「季節性」「ノイズ」に分解し、個別に評価します。" />
+                                     </h3>
+                                     <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                         {/* Trend */}
+                                         <div className="bg-white rounded-3xl shadow-sm border border-gray-100 p-6 h-[320px] flex flex-col relative group">
+                                             <ExpandButton target="stl" />
+                                             <h4 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-2 font-display text-orange-400">トレンド (Trend Component)</h4>
+                                             <div className="flex-1">{renderStlTrend()}</div>
+                                         </div>
+                                         
+                                         {/* Z-Chart */}
+                                         <div className="bg-white rounded-3xl shadow-sm border border-gray-100 p-6 h-[320px] flex flex-col relative group">
+                                             <ExpandButton target="zchart" />
+                                             <h4 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-2 font-display text-[#005EB8]">Zチャート (移動年計)</h4>
+                                             <div className="flex-1">{renderZChart()}</div>
+                                         </div>
+
+                                         {/* Seasonal */}
+                                         <div className="bg-white rounded-3xl shadow-sm border border-gray-100 p-6 h-[320px] flex flex-col relative group">
+                                             <ExpandButton target="stl" />
+                                             <h4 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-2 font-display text-green-500">季節性 (Seasonality)</h4>
+                                             <div className="flex-1">{renderStlSeasonal()}</div>
+                                         </div>
+
+                                         {/* Residual */}
+                                         <div className="bg-white rounded-3xl shadow-sm border border-gray-100 p-6 h-[320px] flex flex-col relative group">
+                                             <ExpandButton target="stl" />
+                                             <h4 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-2 font-display text-red-400">残差 (Residuals / Noise)</h4>
+                                             <div className="flex-1">{renderStlResidual()}</div>
+                                         </div>
+                                     </div>
+                                 </div>
+
+                                 {/* Section 2: Patterns & Similarity */}
+                                 <div>
+                                     <h3 className="text-lg font-black text-slate-800 border-b pb-2 mb-4 font-display flex items-center gap-2">
+                                         2. 特性・類似分析 (Patterns & Similarity)
+                                         <HelpTooltip title="特性・類似分析" content="いつ売れるか（ヒートマップ）や、どの店と似ているか（類似店舗）を分析し、施策の横展開に役立てます。" />
+                                     </h3>
+                                     <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                         {/* Heatmap */}
+                                         <div className="bg-white rounded-3xl shadow-sm border border-gray-100 p-6 relative group h-[400px] flex flex-col">
+                                            <ExpandButton target="heatmap" />
+                                            <h4 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display">月次ヒートマップ</h4>
+                                            <div className="flex-1 overflow-auto">
+                                                <table className="w-full text-center text-[10px] border-collapse">
+                                                    <thead>
+                                                        <tr>
+                                                            <th className="p-1 text-gray-400">Year</th>
+                                                            {[...Array(12)].map((_, i) => <th key={i} className="p-1 text-gray-400">{i + 1}</th>)}
+                                                        </tr>
+                                                    </thead>
+                                                    <tbody>
+                                                        {heatmapData.grid.map(row => (
+                                                            <tr key={row.year}>
+                                                                <td className="font-bold text-gray-600 border-r border-gray-100 p-1">{row.year}</td>
+                                                                {row.months.map((val, i) => {
+                                                                    const intensity = val ? val / heatmapData.maxVal : 0;
+                                                                    const bg = val ? `rgba(0, 94, 184, ${Math.max(0.1, intensity)})` : '#f8fafc';
+                                                                    const text = intensity > 0.6 ? 'white' : 'gray';
+                                                                    return (
+                                                                        <td key={i} className="p-1">
+                                                                            <div style={{ backgroundColor: bg, color: text }} className="rounded w-full h-full py-1 text-[9px] font-bold flex items-center justify-center">
+                                                                                {val ? (val/1000).toFixed(1) : '-'}
+                                                                            </div>
+                                                                        </td>
+                                                                    );
+                                                                })}
+                                                            </tr>
+                                                        ))}
+                                                    </tbody>
+                                                </table>
+                                            </div>
+                                         </div>
+
+                                         {/* Similar Stores */}
+                                         <div className="bg-white rounded-3xl shadow-sm border border-gray-100 p-6 h-[400px] overflow-auto">
+                                             <h4 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display">類似特性を持つ店舗 (Similar DNA)</h4>
+                                             <div className="space-y-3">
+                                                 {similarStores.map((item, i) => (
+                                                     <div key={item.store.name} 
+                                                        className="flex items-center gap-4 p-4 bg-gray-50 rounded-2xl hover:bg-blue-50 transition-colors cursor-pointer group border border-gray-100 hover:border-blue-200"
+                                                        onClick={() => setSelectedStore(item.store.name)}
+                                                     >
+                                                         <div className="w-8 h-8 rounded-full bg-white flex items-center justify-center font-black text-[#005EB8] shadow-sm text-xs border border-gray-100">
+                                                             {i + 1}
+                                                         </div>
+                                                         <div className="flex-1">
+                                                             <div className="flex justify-between items-center mb-1">
+                                                                 <span className="text-sm font-bold text-gray-700 group-hover:text-[#005EB8]">{item.store.name}</span>
+                                                                 <span className="text-[10px] font-black text-white bg-[#005EB8] px-2 py-0.5 rounded-full">
+                                                                     Sim: {Math.round((1 - item.distance)*100)}%
+                                                                 </span>
+                                                             </div>
+                                                             <div className="flex gap-4 text-[10px] text-gray-500 mt-2">
+                                                                 <span className="bg-white px-2 py-1 rounded border border-gray-200">成長率差: {item.kDiff.toFixed(3)}</span>
+                                                                 <span className="bg-white px-2 py-1 rounded border border-gray-200">季節相関: {item.corr.toFixed(2)}</span>
+                                                             </div>
+                                                         </div>
+                                                     </div>
+                                                 ))}
+                                                 {similarStores.length === 0 && (
+                                                     <div className="text-center text-xs text-gray-400 py-8 italic">類似店舗が見つかりませんでした</div>
+                                                 )}
+                                             </div>
+                                         </div>
+                                     </div>
+                                 </div>
+                             </div>
+                         )}
+
+                         {/* --- TAB 4: AI REPORT --- */}
+                         {activeTab === 'ai' && (
+                             <div className="animate-fadeIn">
+                                 <div className="flex justify-between items-center mb-6">
+                                     <h3 className="text-xs font-black text-purple-600 uppercase tracking-widest font-display flex items-center gap-2">
+                                         <span className="bg-purple-100 p-1.5 rounded-lg text-purple-600"><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19.428 15.428a2 2 0 00-1.022-.547l-2.384-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z"></path></svg></span>
+                                         Gemini Pro AI Diagnosis
+                                     </h3>
+                                     <button 
+                                        onClick={handleGenerateAI}
+                                        disabled={aiLoading}
+                                        className="bg-purple-600 hover:bg-purple-700 text-white px-6 py-2 rounded-xl text-xs font-bold shadow-lg shadow-purple-200 flex items-center gap-2 transition-all disabled:opacity-50"
+                                    >
+                                        {aiLoading ? '診断中...' : '最新レポートを生成'}
+                                    </button>
+                                 </div>
+
+                                 {aiReport ? (
+                                     <div className="bg-gradient-to-br from-purple-50 to-white rounded-3xl shadow-sm border border-purple-100 p-8 relative overflow-hidden min-h-[400px]">
+                                         <div className="absolute top-0 right-0 p-4 opacity-10">
+                                             <svg className="w-64 h-64 text-purple-600" fill="currentColor" viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/></svg>
+                                         </div>
+                                         <div className="prose prose-sm max-w-none text-slate-700 bg-white/80 p-6 rounded-2xl backdrop-blur-md border border-purple-50 shadow-sm" dangerouslySetInnerHTML={{ __html: marked(aiReport) }} />
+                                     </div>
+                                 ) : (
+                                     <div className="bg-slate-50 border border-dashed border-slate-200 rounded-3xl h-[400px] flex flex-col items-center justify-center text-slate-400">
+                                         <svg className="w-16 h-16 mb-4 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+                                         <p className="text-sm font-bold">「レポートを生成」ボタンを押してAI診断を開始してください</p>
+                                     </div>
+                                 )}
+                             </div>
+                         )}
                     </>
                 ) : (
-                     <div className="flex-1 flex flex-col items-center justify-center text-gray-300 font-bold uppercase tracking-widest bg-white rounded-3xl border border-dashed border-gray-200 m-8">
-                        <svg className="w-16 h-16 mb-4 text-gray-200" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4"/></svg>
+                    <div className="flex-1 flex flex-col items-center justify-center text-gray-300 font-bold uppercase tracking-widest h-full">
+                        <svg className="w-16 h-16 mb-4 text-gray-200" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4"></path></svg>
                         <p>左のリストから店舗を選択してください</p>
                     </div>
                 )}
@@ -600,11 +590,10 @@ const StoreAnalysisView: React.FC<StoreAnalysisViewProps> = ({ allStores, foreca
                 <div className="fixed inset-0 z-50 bg-white/95 backdrop-blur-sm flex flex-col p-4 md:p-8 animate-fadeIn">
                     <div className="flex justify-between items-center mb-4 border-b pb-4">
                         <h2 className="text-2xl font-black text-gray-800 uppercase tracking-tight font-display">
-                            {expandedChart === 'mainForecast' && '予測詳細 (Prediction Distribution)'}
-                            {expandedChart === 'stlTrend' && 'トレンド要因 (Trend)'}
-                            {expandedChart === 'stlSeasonal' && '季節要因 (Seasonal)'}
-                            {expandedChart === 'stlResidual' && '残差 (Residual)'}
-                            {expandedChart === 'zchart' && 'Zチャート (Z-Chart)'}
+                            {expandedChart === 'main' && '実績 & AI予測 詳細'}
+                            {expandedChart === 'stl' && 'STL分解 (Trend/Season/Residual)'}
+                            {expandedChart === 'zchart' && 'Zチャート (移動年計)'}
+                            {expandedChart === 'heatmap' && '月次ヒートマップ'}
                         </h2>
                         <button 
                             onClick={() => setExpandedChart(null)}
@@ -613,12 +602,43 @@ const StoreAnalysisView: React.FC<StoreAnalysisViewProps> = ({ allStores, foreca
                             <svg className="w-8 h-8 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg>
                         </button>
                     </div>
-                    <div className="flex-1 w-full relative bg-white rounded-xl shadow-lg border border-gray-100 p-4">
-                        {expandedChart === 'mainForecast' && renderMainChart()}
-                        {expandedChart === 'stlTrend' && renderStlTrend()}
-                        {expandedChart === 'stlSeasonal' && renderStlSeasonal()}
-                        {expandedChart === 'stlResidual' && renderStlResidual()}
+                    <div className="flex-1 w-full relative bg-white rounded-xl shadow-lg border border-gray-100 p-4 overflow-auto">
+                        {expandedChart === 'main' && renderMainChart()}
+                        {expandedChart === 'stl' && (
+                            <div className="flex flex-col h-full gap-4">
+                                <div className="flex-1">{renderStlTrend()}</div>
+                                <div className="flex-1">{renderStlSeasonal()}</div>
+                                <div className="flex-1">{renderStlResidual()}</div>
+                            </div>
+                        )}
                         {expandedChart === 'zchart' && renderZChart()}
+                        {expandedChart === 'heatmap' && (
+                             <table className="w-full text-center text-xs border-collapse">
+                                <thead>
+                                    <tr>
+                                        <th className="p-2 text-gray-500">Year</th>
+                                        {[...Array(12)].map((_, i) => <th key={i} className="p-2 text-gray-500">{i + 1}月</th>)}
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {heatmapData.grid.map(row => (
+                                        <tr key={row.year}>
+                                            <td className="font-bold text-gray-700 border p-2">{row.year}</td>
+                                            {row.months.map((val, i) => {
+                                                const intensity = val ? val / heatmapData.maxVal : 0;
+                                                const bg = val ? `rgba(0, 94, 184, ${Math.max(0.1, intensity)})` : '#f8fafc';
+                                                const text = intensity > 0.6 ? 'white' : 'black';
+                                                return (
+                                                    <td key={i} style={{ backgroundColor: bg, color: text }} className="border p-2 font-bold">
+                                                        {val ? val.toLocaleString() : '-'}
+                                                    </td>
+                                                );
+                                            })}
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        )}
                     </div>
                 </div>
             )}

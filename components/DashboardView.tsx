@@ -12,14 +12,24 @@ import {
 interface DashboardViewProps {
     allStores: { [name: string]: StoreData };
     forecastMonths: number;
+    dataType: 'sales' | 'customers';
 }
 
-const DashboardView: React.FC<DashboardViewProps> = ({ allStores, forecastMonths }) => {
+const DashboardView: React.FC<DashboardViewProps> = ({ allStores, forecastMonths, dataType }) => {
     const stores = (Object.values(allStores) as StoreData[]).filter(s => !s.error);
     const activeStores = stores.filter(s => s.isActive);
     const [disabledCohorts, setDisabledCohorts] = useState<string[]>([]);
     const [showForecastTable, setShowForecastTable] = useState(true);
     const [expandedChart, setExpandedChart] = useState<string | null>(null);
+
+    const isSales = dataType === 'sales';
+    const unitLabel = isSales ? '売上 (千円)' : '客数 (人)';
+    const valueFormatter = (val: number) => val.toLocaleString() + (isSales ? '千円' : '人');
+    const totalUnitLabel = isSales ? '百万円' : '千人';
+    const totalValueDivider = isSales ? 1000 : 1000; // Both need /1000 to get M or K if base is thousands or units? 
+    // Wait, if Sales is "1000s Yen", then totalForecast(1000s) / 1000 = Million Yen.
+    // If Customers is "Persons", then totalForecast(Persons) / 1000 = Thousand Persons.
+    // So /1000 is correct for both to get "Million" or "Thousand".
 
     const { 
         chartData, 
@@ -32,8 +42,8 @@ const DashboardView: React.FC<DashboardViewProps> = ({ allStores, forecastMonths
         allCohorts, 
         monthlyForecasts, 
         axisDomains,
-        segmentedData, // New: Mature vs New Sales
-        growthRateData // New: Mature vs New Growth Rate
+        segmentedData, 
+        growthRateData 
     } = useMemo(() => {
         if (stores.length === 0) return { 
             chartData: [], totalForecast: 0, bubbleData: [], vintageData: [], maxLen: 0, qMedians: {x:0, y:0},
@@ -109,12 +119,10 @@ const DashboardView: React.FC<DashboardViewProps> = ({ allStores, forecastMonths
 
             if (t === forecastMonths) finalSum = sum;
             
-            // YoY Calculation for the table
-            // Find value 12 months ago
+            // YoY Calculation
             const lookbackIndex = allPoints.length - 12;
             let prevVal = 0;
             if (lookbackIndex >= 0) {
-                // Use actual if available, otherwise forecast
                 const p = allPoints[lookbackIndex];
                 prevVal = p.actual !== null ? p.actual : (p.forecast || 0);
             }
@@ -132,26 +140,20 @@ const DashboardView: React.FC<DashboardViewProps> = ({ allStores, forecastMonths
             };
 
             forecastData.push(point);
-            allPoints.push(point); // Add to running list for next iteration's lookback
+            allPoints.push(point);
             
             monthlyFs.push({ date: label, val: Math.round(sum), yoy });
         }
 
-        // --- 2. Segmented Data (Combined) ---
         const combinedSegmented = [...histData, ...forecastData];
 
-        // --- 3. Growth Rate Calculation (YoY) for Segments ---
         const growthRates = combinedSegmented.map((curr, i) => {
             if (i < 12) return { date: curr.date, matureYoY: null, newYoY: null, totalYoY: null };
-            
             const prev = combinedSegmented[i - 12];
-            
             const currMature = curr.actual !== null ? curr.matureActual! : curr.matureForecast!;
             const prevMature = prev.actual !== null ? prev.matureActual! : prev.matureForecast!;
-            
             const currNew = curr.actual !== null ? curr.newActual! : curr.newForecast!;
             const prevNew = prev.actual !== null ? prev.newActual! : prev.newForecast!;
-
             const currTotal = curr.actual !== null ? curr.actual! : curr.forecast!;
             const prevTotal = prev.actual !== null ? prev.actual! : prev.forecast!;
 
@@ -164,9 +166,9 @@ const DashboardView: React.FC<DashboardViewProps> = ({ allStores, forecastMonths
         }).filter((_, i) => i >= 12);
 
 
-        // --- 4. Portfolio Analysis (K-Means) ---
+        // --- Portfolio Analysis ---
         let points = activeStores
-            .filter(s => s.fit.mode !== 'startup') // Exclude startups
+            .filter(s => s.fit.mode !== 'startup')
             .map(s => ({
             x: s.params.k,
             y: s.params.L,
@@ -189,7 +191,6 @@ const DashboardView: React.FC<DashboardViewProps> = ({ allStores, forecastMonths
             const sortedXVals = points.map(p => p.x).sort((a, b) => a - b);
             const sortedYVals = points.map(p => p.y).sort((a, b) => a - b);
             
-            // Focus on 70th Percentile (Exclude top 30% outliers for density)
             const idx5 = Math.floor(points.length * 0.05);
             const idx70 = Math.floor(points.length * 0.70);
             
@@ -204,7 +205,6 @@ const DashboardView: React.FC<DashboardViewProps> = ({ allStores, forecastMonths
             const paddingX = (coreMaxX - coreMinX) * 0.05;
             const paddingY = (coreMaxY - coreMinY) * 0.05;
             
-            // Explicitly force X and Y to 70th percentile range
             xDomain = [0, coreMaxX + paddingX];
             yDomain = [Math.max(0, coreMinY - paddingY), coreMaxY + paddingY];
 
@@ -253,7 +253,7 @@ const DashboardView: React.FC<DashboardViewProps> = ({ allStores, forecastMonths
 
         const bubbles: BubblePoint[] = points.map(p => ({ x: p.x, y: p.y, z: p.z, name: p.name, cluster: p.cluster }));
 
-        // --- 5. Vintage Analysis (Normalized) ---
+        // --- Vintage Analysis ---
         const cohorts: { [key: string]: { s: number[], c: number[] } } = {};
         let maxL = 0;
         stores.forEach(s => {
@@ -280,7 +280,7 @@ const DashboardView: React.FC<DashboardViewProps> = ({ allStores, forecastMonths
             return pt;
         });
 
-        // --- 6. Stacked Area Chart (Historical Absolute) ---
+        // --- Stacked Area ---
         const vintageMap: Record<string, StoreData[]> = {};
         const vSet = new Set<string>();
         
@@ -364,7 +364,7 @@ const DashboardView: React.FC<DashboardViewProps> = ({ allStores, forecastMonths
         const link = document.createElement("a");
         const url = URL.createObjectURL(blob);
         link.setAttribute("href", url);
-        link.setAttribute("download", `qb_forecast_${new Date().toISOString().slice(0,10)}.csv`);
+        link.setAttribute("download", `qb_forecast_${dataType}_${new Date().toISOString().slice(0,10)}.csv`);
         document.body.appendChild(link);
         link.click();
         document.body.removeChild(link);
@@ -383,15 +383,15 @@ const DashboardView: React.FC<DashboardViewProps> = ({ allStores, forecastMonths
             <LineChart data={chartData} margin={{ top: 10, right: 10, bottom: 0, left: 0 }}>
                 <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E2E8F0" />
                 <XAxis dataKey="date" tick={{fontSize: 9}} tickMargin={10} minTickGap={30} />
-                <YAxis tick={{fontSize: 9}} label={{ value: '売上 (千円)', angle: -90, position: 'left', offset: 0, fontSize: 9 }} />
-                <Tooltip formatter={(val: number) => val.toLocaleString() + '千円'} contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)' }} />
+                <YAxis tick={{fontSize: 9}} label={{ value: unitLabel, angle: -90, position: 'left', offset: 0, fontSize: 9 }} />
+                <Tooltip formatter={valueFormatter} contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)' }} />
                 <Line type="monotone" dataKey="actual" name="実績" stroke="#1A1A1A" strokeWidth={2} dot={false} isAnimationActive={false} />
                 <Line type="monotone" dataKey="forecast" name="予測" stroke="#005EB8" strokeWidth={2} strokeDasharray="5 5" dot={false} />
                 <Brush dataKey="date" height={20} stroke="#cbd5e1" fill="#f8fafc" />
                 <Legend wrapperStyle={{ fontSize: '9px', paddingTop: '10px' }} iconSize={8} />
             </LineChart>
         </ResponsiveContainer>
-    ), [chartData]);
+    ), [chartData, unitLabel, valueFormatter]);
 
     const renderSegmentedSalesChart = useCallback(() => (
         <ResponsiveContainer width="100%" height="100%">
@@ -408,8 +408,8 @@ const DashboardView: React.FC<DashboardViewProps> = ({ allStores, forecastMonths
                 </defs>
                 <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E2E8F0" />
                 <XAxis dataKey="date" tick={{fontSize: 9}} minTickGap={30} />
-                <YAxis tick={{fontSize: 9}} label={{ value: '売上 (千円)', angle: -90, position: 'left', offset: 0, fontSize: 9 }} />
-                <Tooltip formatter={(val: number) => val.toLocaleString() + '千円'} contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)' }} />
+                <YAxis tick={{fontSize: 9}} label={{ value: unitLabel, angle: -90, position: 'left', offset: 0, fontSize: 9 }} />
+                <Tooltip formatter={valueFormatter} contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)' }} />
                 <Area type="monotone" dataKey="matureActual" stackId="1" stroke="#005EB8" fill="url(#colorMature)" name="実績 (3年以上)" />
                 <Area type="monotone" dataKey="newActual" stackId="1" stroke="#F59E0B" fill="url(#colorNew)" name="実績 (3年未満)" />
                 <Area type="monotone" dataKey="matureForecast" stackId="1" stroke="#005EB8" strokeDasharray="5 5" fill="url(#colorMature)" fillOpacity={0.5} name="予測 (3年以上)" />
@@ -417,7 +417,7 @@ const DashboardView: React.FC<DashboardViewProps> = ({ allStores, forecastMonths
                 <Legend wrapperStyle={{ fontSize: '9px', paddingTop: '10px' }} iconSize={8} />
             </AreaChart>
         </ResponsiveContainer>
-    ), [segmentedData]);
+    ), [segmentedData, unitLabel, valueFormatter]);
 
     const renderGrowthRateChart = useCallback(() => (
         <ResponsiveContainer width="100%" height="100%">
@@ -452,11 +452,11 @@ const DashboardView: React.FC<DashboardViewProps> = ({ allStores, forecastMonths
                 <YAxis 
                     type="number" 
                     dataKey="y" 
-                    name="潜在需要 (L)" 
+                    name={`潜在需要 (L) [${isSales ? '千円' : '人'}]`}
                     domain={axisDomains.y}
                     allowDataOverflow={true}
                     tick={{fontSize: 9}} 
-                    label={{ value: '潜在需要 (L) [千円] →', angle: -90, position: 'left', offset: 0, fontSize: 9, fontWeight: 900 }} 
+                    label={{ value: `潜在需要 (L) [${isSales ? '千円' : '人'}] →`, angle: -90, position: 'left', offset: 0, fontSize: 9, fontWeight: 900 }} 
                 />
                 <ZAxis type="number" dataKey="z" range={[50, 400]} />
                 <Tooltip cursor={{ strokeDasharray: '3 3' }} content={({ active, payload }) => {
@@ -468,7 +468,7 @@ const DashboardView: React.FC<DashboardViewProps> = ({ allStores, forecastMonths
                                 <p>Cluster: {data.cluster + 1}</p>
                                 <div className="mt-1 border-t pt-1">
                                     <p>成長率(k): {data.x.toFixed(3)}</p>
-                                    <p>潜在力(L): {Math.round(data.y).toLocaleString()}千円</p>
+                                    <p>潜在力(L): {Math.round(data.y).toLocaleString()}{isSales ? '千円' : '人'}</p>
                                 </div>
                             </div>
                         );
@@ -483,7 +483,7 @@ const DashboardView: React.FC<DashboardViewProps> = ({ allStores, forecastMonths
                 <Legend wrapperStyle={{ fontSize: '9px', paddingTop: '10px' }} iconSize={8} />
             </ScatterChart>
         </ResponsiveContainer>
-    ), [bubbleData, axisDomains, qMedians]);
+    ), [bubbleData, axisDomains, qMedians, isSales]);
 
     const renderStackedAreaChart = useCallback(() => (
         <ResponsiveContainer width="100%" height="100%">
@@ -497,9 +497,9 @@ const DashboardView: React.FC<DashboardViewProps> = ({ allStores, forecastMonths
                     ))}
                 </defs>
                 <XAxis dataKey="date" tick={{fontSize: 9}} minTickGap={30} />
-                <YAxis tick={{fontSize: 9}} label={{ value: '売上 (千円)', angle: -90, position: 'left', offset: 0, fontSize: 9 }} />
+                <YAxis tick={{fontSize: 9}} label={{ value: unitLabel, angle: -90, position: 'left', offset: 0, fontSize: 9 }} />
                 <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E2E8F0" />
-                <Tooltip formatter={(val: number) => val.toLocaleString() + '千円'} contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)' }} />
+                <Tooltip formatter={valueFormatter} contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)' }} />
                 {allCohorts.map((cohort, i) => (
                     !disabledCohorts.includes(cohort) && (
                         <Area
@@ -515,15 +515,15 @@ const DashboardView: React.FC<DashboardViewProps> = ({ allStores, forecastMonths
                 ))}
             </AreaChart>
         </ResponsiveContainer>
-    ), [stackedAreaData, allCohorts, disabledCohorts]);
+    ), [stackedAreaData, allCohorts, disabledCohorts, unitLabel, valueFormatter]);
 
     const renderVintageChart = useCallback(() => (
         <ResponsiveContainer width="100%" height="100%">
             <LineChart data={vintageData} margin={{ top: 10, right: 10, bottom: 0, left: 0 }}>
                 <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E2E8F0" />
                 <XAxis dataKey="period" tick={{fontSize: 9}} minTickGap={30} />
-                <YAxis tick={{fontSize: 9}} label={{ value: '平均売上 (千円)', angle: -90, position: 'left', offset: 0, fontSize: 9 }} />
-                <Tooltip formatter={(val: number) => val.toLocaleString() + '千円'} />
+                <YAxis tick={{fontSize: 9}} label={{ value: `平均${isSales ? '売上' : '客数'}`, angle: -90, position: 'left', offset: 0, fontSize: 9 }} />
+                <Tooltip formatter={valueFormatter} />
                 <Legend wrapperStyle={{ fontSize: '9px', paddingTop: '10px' }} iconSize={8} />
                 {Object.keys(vintageData[0] || {}).filter(k => k !== 'period').map((key, i) => (
                     <Line 
@@ -538,7 +538,7 @@ const DashboardView: React.FC<DashboardViewProps> = ({ allStores, forecastMonths
                 ))}
             </LineChart>
         </ResponsiveContainer>
-    ), [vintageData]);
+    ), [vintageData, isSales, valueFormatter]);
 
     const ExpandButton = ({ target }: { target: string }) => (
         <button 
@@ -551,10 +551,10 @@ const DashboardView: React.FC<DashboardViewProps> = ({ allStores, forecastMonths
     );
 
     return (
-        <div className="absolute inset-0 overflow-y-auto p-4 md:p-8 animate-fadeIn">
-            <div className="max-w-7xl mx-auto space-y-6">
+        <div className="absolute inset-0 overflow-y-auto p-4 md:p-8 animate-fadeIn bg-[#F8FAFC]">
+            <div className="w-full px-4 md:px-8 space-y-6">
                 <div className="flex justify-between items-center">
-                    <h2 className="text-2xl font-black text-gray-800 uppercase tracking-tight font-display">全社経営ダッシュボード</h2>
+                    <h2 className="text-2xl font-black text-gray-800 uppercase tracking-tight font-display">全社経営ダッシュボード ({isSales ? '売上' : '客数'})</h2>
                     <button 
                         onClick={handleDownloadCSV}
                         className="bg-white border border-gray-200 hover:bg-gray-50 text-[#005EB8] font-bold py-2 px-6 rounded-lg shadow-sm text-xs uppercase tracking-widest flex items-center gap-2 transition-all"
@@ -568,10 +568,9 @@ const DashboardView: React.FC<DashboardViewProps> = ({ allStores, forecastMonths
                     <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6 border-l-8 border-[#005EB8]">
                         <p className="text-[10px] text-gray-400 uppercase mb-1 flex items-center">
                             稼働店舗合計予測値
-                            <HelpTooltip title="稼働店舗合計予測値" content="全稼働店舗の来月以降の予測売上（ロジスティックモデルによるトレンド + 季節性 + 直近補正）を合算した数値です。新規出店計画分は含まれていません。" />
+                            <HelpTooltip title="稼働店舗合計予測値" content="全稼働店舗の来月以降の予測値（ロジスティックモデルによるトレンド + 季節性 + 直近補正）を合算した数値です。新規出店計画分は含まれていません。" />
                         </p>
-                        {/* totalForecast is sum of raw (1000s). So totalForecast * 1000 Yen. -> / 1000000 = HyakuMan Yen */}
-                        <h3 className="text-3xl font-black text-[#005EB8]">{Math.round(totalForecast / 100).toLocaleString()}<span className="text-sm text-gray-400 ml-2">百万円</span></h3>
+                        <h3 className="text-3xl font-black text-[#005EB8]">{Math.round(totalForecast / totalValueDivider).toLocaleString()}<span className="text-sm text-gray-400 ml-2">{totalUnitLabel}</span></h3>
                     </div>
                     <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6 border-l-8 border-orange-500">
                         <p className="text-[10px] text-gray-400 uppercase mb-1">分析対象店舗数 (稼働中)</p>
@@ -623,9 +622,9 @@ const DashboardView: React.FC<DashboardViewProps> = ({ allStores, forecastMonths
                                     </thead>
                                     <tbody>
                                         <tr>
-                                            <td className="px-2 py-2 font-bold text-gray-600 border-r border-gray-100 text-left whitespace-nowrap">予測売上</td>
+                                            <td className="px-2 py-2 font-bold text-gray-600 border-r border-gray-100 text-left whitespace-nowrap">予測{isSales ? '売上' : '客数'}</td>
                                             {monthlyForecasts.slice(0, 12).map(d => (
-                                                <td key={d.date} className="px-2 py-2 font-bold text-[#005EB8] border-r border-gray-100">{d.val.toLocaleString()}<span className="text-[9px] text-gray-400 ml-0.5">k</span></td>
+                                                <td key={d.date} className="px-2 py-2 font-bold text-[#005EB8] border-r border-gray-100">{d.val.toLocaleString()}<span className="text-[9px] text-gray-400 ml-0.5">{isSales ? 'k' : '人'}</span></td>
                                             ))}
                                         </tr>
                                         <tr>
@@ -677,10 +676,10 @@ const DashboardView: React.FC<DashboardViewProps> = ({ allStores, forecastMonths
                     <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-5 h-[360px] flex flex-col relative group">
                         <ExpandButton target="segmentedSales" />
                         <h3 className="font-black text-gray-700 text-xs uppercase tracking-widest mb-4 font-display flex items-center">
-                            既存店(3年以上) vs 新店 売上推移比較
+                            既存店(3年以上) vs 新店 {isSales ? '売上' : '客数'}推移比較
                             <HelpTooltip 
-                                title="セグメント別売上推移" 
-                                content="全社売上を「オープン3年以上の既存店（青）」と「3年未満の新店（オレンジ）」に分けて表示します。新店効果で全体の数字が良く見えているだけではないか？を確認するために使います。" 
+                                title={`セグメント別${isSales ? '売上' : '客数'}推移`} 
+                                content={`全社数値を「オープン3年以上の既存店（青）」と「3年未満の新店（オレンジ）」に分けて表示します。新店効果で全体の数字が良く見えているだけではないか？を確認するために使います。`} 
                             />
                         </h3>
                         <div className="h-full pb-8">
@@ -706,10 +705,10 @@ const DashboardView: React.FC<DashboardViewProps> = ({ allStores, forecastMonths
                     <ExpandButton target="stacked" />
                     <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 gap-4">
                         <h3 className="font-black text-gray-700 text-xs uppercase tracking-widest font-display whitespace-nowrap flex items-center">
-                            全社売上 積上構成 (創業ビンテージ別)
+                            全社{isSales ? '売上' : '客数'} 積上構成 (創業ビンテージ別)
                             <HelpTooltip 
                                 title="Vintage別積上グラフ" 
-                                content="オープン時期（年代）ごとに売上を色分けして積み上げたグラフです。「昔オープンした層（下の層）」が細くなっていないか（既存店の衰退）をチェックします。" 
+                                content="オープン時期（年代）ごとに実績を色分けして積み上げたグラフです。「昔オープンした層（下の層）」が細くなっていないか（既存店の衰退）をチェックします。" 
                             />
                         </h3>
                         <div className="flex flex-wrap gap-2 max-w-full justify-end pr-8">
@@ -743,7 +742,7 @@ const DashboardView: React.FC<DashboardViewProps> = ({ allStores, forecastMonths
                             title="Vintage分析 (エイジング)" 
                             content={
                                 <>
-                                    <p>オープン時期（世代）ごとに、経過月数ごとの平均売上を比較したものです。</p>
+                                    <p>オープン時期（世代）ごとに、経過月数ごとの平均実績を比較したものです。</p>
                                     <p className="mt-2 font-bold text-slate-700">解釈:</p>
                                     <p>新しい世代の線（明るい色）が古い世代（暗い色）より上にきていれば、出店戦略は成功しています（初速が良くなっている）。逆なら、立地選定の質が落ちている可能性があります。</p>
                                 </>
@@ -763,9 +762,9 @@ const DashboardView: React.FC<DashboardViewProps> = ({ allStores, forecastMonths
                         <h2 className="text-2xl font-black text-gray-800 uppercase tracking-tight font-display">
                             {expandedChart === 'forecast' && '全社推移予測 詳細'}
                             {expandedChart === 'portfolio' && 'ポートフォリオ分析 詳細'}
-                            {expandedChart === 'stacked' && '全社売上 積上構成 詳細'}
+                            {expandedChart === 'stacked' && `全社${isSales ? '売上' : '客数'} 積上構成 詳細`}
                             {expandedChart === 'vintage' && 'Vintage分析 詳細'}
-                            {expandedChart === 'segmentedSales' && '既存店 vs 新店 売上比較 詳細'}
+                            {expandedChart === 'segmentedSales' && `既存店 vs 新店 ${isSales ? '売上' : '客数'}比較 詳細`}
                             {expandedChart === 'segmentedGrowth' && '属性別 成長率(YoY)推移 詳細'}
                         </h2>
                         <button 

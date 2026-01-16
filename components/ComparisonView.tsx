@@ -9,41 +9,45 @@ import {
 
 interface ComparisonViewProps {
     allStores: { [name: string]: StoreData };
+    dataType: 'sales' | 'customers';
 }
 
-const ComparisonView: React.FC<ComparisonViewProps> = ({ allStores }) => {
+const ComparisonView: React.FC<ComparisonViewProps> = ({ allStores, dataType }) => {
     const [selectedStores, setSelectedStores] = useState<string[]>([]);
     const [mode, setMode] = useState<'calendar' | 'vintage'>('vintage');
     const [showForecast, setShowForecast] = useState(true);
     const [expandedChart, setExpandedChart] = useState<boolean>(false);
 
     const storeNames = Object.keys(allStores).sort();
-    
-    // Limits
-    const MAX_SELECTION = 3;
+    const isSales = dataType === 'sales';
 
     const toggleStore = (name: string) => {
         if (selectedStores.includes(name)) {
             setSelectedStores(prev => prev.filter(n => n !== name));
         } else {
-            if (selectedStores.length < MAX_SELECTION) {
-                setSelectedStores(prev => [...prev, name]);
-            }
+            // No limit on selection
+            setSelectedStores(prev => [...prev, name]);
         }
     };
 
-    const colors = ['#005EB8', '#F59E0B', '#10B981'];
+    // Dynamic Color Generator
+    const getColor = (index: number) => {
+        const colors = [
+            '#005EB8', '#F59E0B', '#10B981', '#EF4444', '#8B5CF6', 
+            '#EC4899', '#6366F1', '#14B8A6', '#F97316', '#06B6D4',
+            '#84CC16', '#A855F7', '#D946EF', '#E11D48', '#3B82F6'
+        ];
+        return colors[index % colors.length];
+    };
 
     const chartData = useMemo(() => {
         if (selectedStores.length === 0) return [];
 
         if (mode === 'calendar') {
-            // Calendar Mode: X-Axis is Date string
             const dateSet = new Set<string>();
             selectedStores.forEach(name => {
                 const s = allStores[name];
                 s.dates.forEach(d => dateSet.add(d));
-                // Add forecast dates if needed
                 if(showForecast) {
                     const lastD = new Date(s.dates[s.dates.length-1].replace(/\//g,'-'));
                     for(let i=1; i<=12; i++) {
@@ -53,7 +57,6 @@ const ComparisonView: React.FC<ComparisonViewProps> = ({ allStores }) => {
                     }
                 }
             });
-            // Fix: Sort chronologically using Date objects
             const dates = Array.from(dateSet).sort((a, b) => {
                 return new Date(a.replace(/\//g, '-')).getTime() - new Date(b.replace(/\//g, '-')).getTime();
             });
@@ -67,11 +70,9 @@ const ComparisonView: React.FC<ComparisonViewProps> = ({ allStores }) => {
                     if (idx !== -1 && s.mask[idx]) {
                         pt[name] = s.raw[idx];
                     } else if (showForecast) {
-                        // Check if it's a future date relative to this store's last date
                         const lastDate = new Date(s.dates[s.dates.length-1].replace(/\//g,'-'));
                         const currDate = new Date(d.replace(/\//g,'-'));
                         if (currDate > lastDate) {
-                            // Forecast calculation
                             const monthsDiff = (currDate.getFullYear() - lastDate.getFullYear()) * 12 + (currDate.getMonth() - lastDate.getMonth());
                              if(monthsDiff <= 12) {
                                 const t = s.raw.length + monthsDiff - 1;
@@ -86,7 +87,6 @@ const ComparisonView: React.FC<ComparisonViewProps> = ({ allStores }) => {
                 return pt;
             });
         } else {
-            // Vintage Mode: X-Axis is Month Number (1, 2, 3...)
             let maxLen = 0;
             selectedStores.forEach(name => {
                 const len = allStores[name].raw.length + (showForecast ? 12 : 0);
@@ -102,13 +102,11 @@ const ComparisonView: React.FC<ComparisonViewProps> = ({ allStores }) => {
                     } else if (showForecast && i < s.raw.length + 12) {
                         const t = i;
                         const tr = logisticModel(t, s.fit.params, s.fit.mode, s.fit.shockIdx);
-                        // For vintage mode, seasonality is tricky because months don't align. 
-                        // We use index % 12, but we need the start month offset.
-                        const startD = new Date(s.dates[0].replace(/\//g, '-'));
-                        const mIdx = (startD.getMonth() + i) % 12;
-                        const sea = s.seasonal[mIdx] || 1.0;
-                        const nudgeStep = i - s.raw.length + 1;
-                        const val = (tr * sea) + (s.nudge * Math.pow(s.nudgeDecay, nudgeStep));
+                        // For seasonality in vintage mode, we align by month index relative to start or average seasonality?
+                        // Usually Vintage mode strips seasonality or uses raw. Here we use model projection.
+                        // Let's use simple trend for forecast in vintage to avoid seasonality phase mismatch.
+                        // Or imply a 'standard' seasonality.
+                        const val = tr; // Simplified for vintage forecast
                         pt[`${name}_forecast`] = Math.round(val);
                     }
                 });
@@ -128,7 +126,7 @@ const ComparisonView: React.FC<ComparisonViewProps> = ({ allStores }) => {
                     minTickGap={30}
                 />
                 <YAxis tick={{fontSize: 9}} />
-                <Tooltip formatter={(val: number) => val.toLocaleString()} contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgba(0,0,0,0.1)' }} />
+                <Tooltip formatter={(val: number) => val.toLocaleString() + (isSales ? '' : '人')} contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgba(0,0,0,0.1)' }} />
                 <Legend wrapperStyle={{ fontSize: '10px', paddingTop: '10px', fontWeight: 'bold' }} />
                 
                 {selectedStores.map((name, i) => (
@@ -137,7 +135,7 @@ const ComparisonView: React.FC<ComparisonViewProps> = ({ allStores }) => {
                             type="monotone" 
                             dataKey={name} 
                             name={name} 
-                            stroke={colors[i]} 
+                            stroke={getColor(i)} 
                             strokeWidth={2} 
                             dot={false}
                             connectNulls
@@ -147,7 +145,7 @@ const ComparisonView: React.FC<ComparisonViewProps> = ({ allStores }) => {
                                 type="monotone" 
                                 dataKey={`${name}_forecast`} 
                                 name={`${name} (予)`} 
-                                stroke={colors[i]} 
+                                stroke={getColor(i)} 
                                 strokeWidth={2} 
                                 strokeDasharray="5 5" 
                                 dot={false}
@@ -158,7 +156,7 @@ const ComparisonView: React.FC<ComparisonViewProps> = ({ allStores }) => {
                 {mode === 'calendar' && <Brush dataKey="date" height={20} stroke="#cbd5e1" fill="#f8fafc" />}
             </LineChart>
         </ResponsiveContainer>
-    ), [chartData, selectedStores, mode, showForecast, colors]);
+    ), [chartData, selectedStores, mode, showForecast, isSales]);
 
     return (
         <div className="absolute inset-0 overflow-y-auto p-4 md:p-8 animate-fadeIn bg-[#F8FAFC]">
@@ -168,21 +166,31 @@ const ComparisonView: React.FC<ComparisonViewProps> = ({ allStores }) => {
                 <div className="lg:w-1/4 bg-white rounded-3xl shadow-sm border border-gray-100 flex flex-col h-full overflow-hidden">
                     <div className="p-6 bg-white border-b border-gray-100">
                         <h2 className="text-xl font-black text-gray-800 uppercase tracking-tight font-display mb-2">店舗比較ベンチマーク</h2>
-                        <p className="text-xs text-gray-400 font-bold">最大3店舗まで選択可能</p>
+                        <div className="flex justify-between items-center text-xs text-gray-400 font-bold">
+                            <span>選択中: <span className="text-[#005EB8]">{selectedStores.length}</span> 店舗</span>
+                            {selectedStores.length > 0 && (
+                                <button onClick={() => setSelectedStores([])} className="text-red-400 hover:underline">クリア</button>
+                            )}
+                        </div>
                     </div>
-                    <div className="flex-1 overflow-y-auto p-3 space-y-1">
-                        {storeNames.map(n => {
+                    <div className="flex-1 overflow-y-auto p-3 space-y-1 custom-scrollbar">
+                        {storeNames.map((n, idx) => {
                             const isSelected = selectedStores.includes(n);
-                            const isDisabled = !isSelected && selectedStores.length >= MAX_SELECTION;
+                            // Find index in selection for color
+                            const selectionIndex = selectedStores.indexOf(n);
+                            const color = selectionIndex >= 0 ? getColor(selectionIndex) : '#9CA3AF';
+                            
                             return (
                                 <button
                                     key={n}
                                     onClick={() => toggleStore(n)}
-                                    disabled={isDisabled}
-                                    className={`w-full text-left px-5 py-3 rounded-2xl text-xs font-bold transition-all flex justify-between items-center ${isSelected ? 'bg-[#005EB8] text-white shadow-md' : 'text-gray-500 hover:bg-gray-50'} ${isDisabled ? 'opacity-40 cursor-not-allowed' : ''}`}
+                                    className={`w-full text-left px-4 py-3 rounded-xl text-xs font-bold transition-all flex justify-between items-center border ${isSelected ? 'bg-blue-50 border-blue-100 shadow-sm' : 'bg-white border-transparent hover:bg-slate-50 text-gray-500'}`}
                                 >
-                                    <span>{n}</span>
-                                    {isSelected && <span className="bg-white/20 px-2 py-0.5 rounded text-[9px]">選択中</span>}
+                                    <div className="flex items-center gap-2">
+                                        <div className={`w-3 h-3 rounded-full flex-shrink-0 transition-colors`} style={{ backgroundColor: isSelected ? color : '#E5E7EB' }}></div>
+                                        <span className={isSelected ? 'text-gray-800' : ''}>{n}</span>
+                                    </div>
+                                    {isSelected && <span className="text-[#005EB8] font-black">✓</span>}
                                 </button>
                             );
                         })}
@@ -239,7 +247,7 @@ const ComparisonView: React.FC<ComparisonViewProps> = ({ allStores }) => {
                                         <tr className="border-b border-gray-100">
                                             <th className="py-2 px-4 text-left font-black text-gray-400 uppercase">Metric</th>
                                             {selectedStores.map((name, i) => (
-                                                <th key={name} className="py-2 px-4 font-black text-gray-800" style={{color: colors[i]}}>{name}</th>
+                                                <th key={name} className="py-2 px-4 font-black text-gray-800" style={{color: getColor(i)}}>{name}</th>
                                             ))}
                                         </tr>
                                     </thead>

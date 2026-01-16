@@ -5,13 +5,14 @@ import HelpTooltip from './HelpTooltip';
 
 interface StoreTableViewProps {
     allStores: { [name: string]: StoreData };
+    dataType: 'sales' | 'customers';
 }
 
-type SortField = 'name' | 'sales' | 'yoy' | 'abc' | 'k' | 'L' | 'age' | 'status';
+type SortField = 'region' | 'prefecture' | 'block' | 'name' | 'sales' | 'yoy' | 'abc' | 'k' | 'L' | 'age' | 'status';
 type SortOrder = 'asc' | 'desc';
 type ViewMode = 'list' | 'matrix';
 
-const StoreTableView: React.FC<StoreTableViewProps> = ({ allStores }) => {
+const StoreTableView: React.FC<StoreTableViewProps> = ({ allStores, dataType }) => {
     const [viewMode, setViewMode] = useState<ViewMode>('list');
     
     // Filter States
@@ -27,6 +28,8 @@ const StoreTableView: React.FC<StoreTableViewProps> = ({ allStores }) => {
     // Sort States
     const [sortField, setSortField] = useState<SortField>('sales');
     const [sortOrder, setSortOrder] = useState<SortOrder>('desc');
+
+    const isSales = dataType === 'sales';
 
     // --- Unified Data Pipeline ---
 
@@ -69,8 +72,15 @@ const StoreTableView: React.FC<StoreTableViewProps> = ({ allStores }) => {
                 // Status Filter
                 if (!showInactive && !s.isActive) return false;
                 
-                // Text Filter
-                if (filterText && !s.name.toLowerCase().includes(filterText.toLowerCase())) return false;
+                // Text Filter (Name, Block, Region, Prefecture)
+                if (filterText) {
+                    const search = filterText.toLowerCase();
+                    const nameMatch = s.name.toLowerCase().includes(search);
+                    const blockMatch = (s.block || "").toLowerCase().includes(search);
+                    const regionMatch = (s.region || "").toLowerCase().includes(search);
+                    const prefMatch = (s.prefecture || "").toLowerCase().includes(search);
+                    if (!nameMatch && !blockMatch && !regionMatch && !prefMatch) return false;
+                }
                 
                 // ABC Filter
                 if (filterABC !== 'All') {
@@ -80,8 +90,7 @@ const StoreTableView: React.FC<StoreTableViewProps> = ({ allStores }) => {
 
                 // Mode Filter
                 if (filterMode !== 'All') {
-                    // mode in data is 'standard'|'shift'|'recovery'|'startup'
-                    // filterMode values will be capitalized in UI, so we match carefully
+                    // mode in data is 'standard'|'shift'|'dual_shift'|'recovery'|'startup'
                     if (s.fit.mode !== filterMode) return false;
                 }
 
@@ -92,6 +101,9 @@ const StoreTableView: React.FC<StoreTableViewProps> = ({ allStores }) => {
                 let valB: any = '';
 
                 switch (sortField) {
+                    case 'region': valA = a.region || ""; valB = b.region || ""; break;
+                    case 'prefecture': valA = a.prefecture || ""; valB = b.prefecture || ""; break;
+                    case 'block': valA = a.block || ""; valB = b.block || ""; break;
                     case 'name': valA = a.name; valB = b.name; break;
                     case 'sales': valA = a.latestSales; valB = b.latestSales; break;
                     case 'yoy': valA = a.stats?.yoy || -999; valB = b.stats?.yoy || -999; break;
@@ -147,11 +159,14 @@ const StoreTableView: React.FC<StoreTableViewProps> = ({ allStores }) => {
 
     const handleDownloadCSV = () => {
         if (viewMode === 'list') {
-            const headers = ["店舗名", "ステータス", "ABCランク", "稼働月数", "直近月商(k)", "昨対比(YoY)", "成長率(k)", "潜在需要(L)", "モード", "変動率(CV)"];
+            const headers = ["地方", "都道府県", "ブロック", "店舗名", "ステータス", "ABCランク", "稼働月数", isSales ? "直近月商(k)" : "直近客数(人)", "昨対比(YoY)", "成長率(k)", "潜在需要(L)", "モード", "変動率(CV)"];
             let csv = headers.join(",") + "\n";
             
             sortedFilteredData.forEach(s => {
                 const row = [
+                    `"${s.region || '-'}"`,
+                    `"${s.prefecture || '-'}"`,
+                    `"${s.block || '-'}"`,
                     `"${s.name}"`,
                     s.isActive ? "稼働中" : "閉店/休業",
                     s.stats?.abcRank || "-",
@@ -168,10 +183,13 @@ const StoreTableView: React.FC<StoreTableViewProps> = ({ allStores }) => {
             downloadBlob(csv, `store_list_${new Date().toISOString().slice(0,10)}.csv`);
         } else {
             // Matrix CSV
-            const headers = ["店舗名", "ステータス", ...matrixHeaders];
+            const headers = ["地方", "都道府県", "ブロック", "店舗名", "ステータス", ...matrixHeaders];
             let csv = headers.join(",") + "\n";
             matrixRows.forEach(r => {
                 const row = [
+                    `"${r.region || '-'}"`,
+                    `"${r.prefecture || '-'}"`,
+                    `"${r.block || '-'}"`,
                     `"${r.name}"`,
                     r.isActive ? "稼働中" : "閉店/休業",
                     ...matrixHeaders.map(d => r.dataMap[d] !== undefined ? r.dataMap[d] : "")
@@ -200,7 +218,7 @@ const StoreTableView: React.FC<StoreTableViewProps> = ({ allStores }) => {
 
     return (
         <div className="absolute inset-0 overflow-y-auto p-4 md:p-8 animate-fadeIn bg-[#F8FAFC]">
-            <div className="max-w-7xl mx-auto h-full flex flex-col">
+            <div className="w-full px-4 md:px-8 h-full flex flex-col">
                 {/* Header & Controls Area */}
                 <div className="flex flex-col gap-4 mb-6 flex-shrink-0">
                     
@@ -238,7 +256,7 @@ const StoreTableView: React.FC<StoreTableViewProps> = ({ allStores }) => {
                         <div className="relative flex-1 w-full xl:w-64">
                             <input 
                                 type="text" 
-                                placeholder="店舗名検索..." 
+                                placeholder="地名・店舗名で検索..." 
                                 value={filterText}
                                 onChange={(e) => setFilterText(e.target.value)}
                                 className="w-full pl-9 pr-4 py-2 rounded-lg border border-gray-200 text-xs font-bold focus:outline-none focus:ring-2 focus:ring-[#005EB8]"
@@ -269,6 +287,7 @@ const StoreTableView: React.FC<StoreTableViewProps> = ({ allStores }) => {
                                 <option value="All">Mode: 全て</option>
                                 <option value="standard">Standard (安定)</option>
                                 <option value="shift">Shift (構造変化)</option>
+                                <option value="dual_shift">Dual Shift (コロナ+α)</option>
                                 <option value="recovery">Recovery (回復)</option>
                                 <option value="startup">Startup (新規)</option>
                             </select>
@@ -279,10 +298,12 @@ const StoreTableView: React.FC<StoreTableViewProps> = ({ allStores }) => {
                                 onChange={(e) => { setSortField(e.target.value as SortField); setSortOrder('desc'); }}
                                 className="px-3 py-2 rounded-lg border border-gray-200 text-xs font-bold text-gray-600 focus:outline-none focus:ring-2 focus:ring-[#005EB8] bg-gray-50 hover:bg-white transition-colors cursor-pointer xl:hidden"
                             >
-                                <option value="sales">Sort: 売上</option>
+                                <option value="sales">Sort: {isSales ? '売上' : '客数'}</option>
                                 <option value="yoy">Sort: 昨対比</option>
                                 <option value="abc">Sort: ABC</option>
                                 <option value="name">Sort: 店舗名</option>
+                                <option value="block">Sort: ブロック</option>
+                                <option value="prefecture">Sort: 都道府県</option>
                             </select>
 
                             {/* Date Range Filters (Visible only in Matrix Mode) */}
@@ -331,9 +352,12 @@ const StoreTableView: React.FC<StoreTableViewProps> = ({ allStores }) => {
                                 <thead className="bg-white sticky top-0 z-10 shadow-sm">
                                     <tr>
                                         <th onClick={() => handleSort('status')} className={thClass('status')}>状態</th>
+                                        <th onClick={() => handleSort('region')} className={thClass('region')}>地方</th>
+                                        <th onClick={() => handleSort('prefecture')} className={thClass('prefecture')}>都道府県</th>
+                                        <th onClick={() => handleSort('block')} className={thClass('block')}>ブロック</th>
                                         <th onClick={() => handleSort('name')} className={thClass('name')}>店舗名</th>
                                         <th onClick={() => handleSort('abc')} className={thClass('abc')}>ABC</th>
-                                        <th onClick={() => handleSort('sales')} className={`${thClass('sales')} text-right`}>直近月商 (k)</th>
+                                        <th onClick={() => handleSort('sales')} className={`${thClass('sales')} text-right`}>{isSales ? '直近月商 (k)' : '直近客数 (人)'}</th>
                                         <th onClick={() => handleSort('yoy')} className={`${thClass('yoy')} text-right`}>昨対比 (YoY)</th>
                                         <th onClick={() => handleSort('k')} className={`${thClass('k')} text-right`}>成長率 (k)</th>
                                         <th onClick={() => handleSort('L')} className={`${thClass('L')} text-right`}>潜在需要 (L)</th>
@@ -350,6 +374,9 @@ const StoreTableView: React.FC<StoreTableViewProps> = ({ allStores }) => {
                                                     {s.isActive ? 'ACTIVE' : 'CLOSED'}
                                                 </span>
                                             </td>
+                                            <td className="px-4 py-3 text-xs font-bold text-gray-500 whitespace-nowrap">{s.region || "-"}</td>
+                                            <td className="px-4 py-3 text-xs font-bold text-gray-500 whitespace-nowrap">{s.prefecture || "-"}</td>
+                                            <td className="px-4 py-3 text-xs font-bold text-gray-500 whitespace-nowrap">{s.block || "-"}</td>
                                             <td className="px-4 py-3 text-xs font-bold text-gray-800 whitespace-nowrap">{s.name}</td>
                                             <td className="px-4 py-3 text-xs font-black">
                                                 <span className={`
@@ -368,7 +395,8 @@ const StoreTableView: React.FC<StoreTableViewProps> = ({ allStores }) => {
                                             <td className="px-4 py-3 text-xs font-mono text-right text-[#005EB8]">{Math.round(s.params.L).toLocaleString()}</td>
                                             <td className="px-4 py-3 text-xs text-gray-500 whitespace-nowrap">
                                                 <span className={`px-2 py-0.5 rounded text-[10px] uppercase font-bold
-                                                    ${s.fit.mode === 'shift' ? 'bg-purple-100 text-purple-600' : 
+                                                    ${s.fit.mode === 'dual_shift' ? 'bg-indigo-100 text-indigo-600' :
+                                                      s.fit.mode === 'shift' ? 'bg-purple-100 text-purple-600' : 
                                                       s.fit.mode === 'startup' ? 'bg-orange-100 text-orange-600' : 
                                                       'bg-gray-100 text-gray-500'}
                                                 `}>
@@ -389,8 +417,10 @@ const StoreTableView: React.FC<StoreTableViewProps> = ({ allStores }) => {
                             <table className="min-w-full divide-y divide-gray-200 border-separate" style={{borderSpacing: 0}}>
                                 <thead className="bg-white sticky top-0 z-10 shadow-sm">
                                     <tr>
-                                        <th className="sticky left-0 bg-white z-20 px-4 py-3 text-left text-xs font-black text-gray-500 uppercase tracking-wider border-b border-r border-gray-200">店舗名</th>
-                                        <th className="sticky left-[100px] bg-white z-20 px-4 py-3 text-left text-xs font-black text-gray-500 uppercase tracking-wider border-b border-r border-gray-200">Status</th>
+                                        <th className="sticky left-0 bg-white z-20 px-4 py-3 text-left text-xs font-black text-gray-500 uppercase tracking-wider border-b border-r border-gray-200">地方</th>
+                                        <th className="sticky left-[100px] bg-white z-20 px-4 py-3 text-left text-xs font-black text-gray-500 uppercase tracking-wider border-b border-r border-gray-200">都道府県</th>
+                                        <th className="sticky left-[200px] bg-white z-20 px-4 py-3 text-left text-xs font-black text-gray-500 uppercase tracking-wider border-b border-r border-gray-200">店舗名</th>
+                                        <th className="sticky left-[340px] bg-white z-20 px-4 py-3 text-left text-xs font-black text-gray-500 uppercase tracking-wider border-b border-r border-gray-200">Status</th>
                                         {matrixHeaders.map(date => (
                                             <th key={date} className="px-2 py-3 text-center text-[10px] font-bold text-gray-400 border-b border-gray-100 min-w-[60px] whitespace-nowrap">
                                                 {date.split('/')[0]}<br/><span className="text-gray-600 text-xs">{date.split('/')[1]}</span>
@@ -401,8 +431,10 @@ const StoreTableView: React.FC<StoreTableViewProps> = ({ allStores }) => {
                                 <tbody className="bg-white divide-y divide-gray-50">
                                     {matrixRows.map(r => (
                                         <tr key={r.name} className="hover:bg-blue-50/50 transition-colors">
-                                            <td className="sticky left-0 bg-white z-10 px-4 py-2 text-xs font-bold text-gray-800 border-r border-gray-200 whitespace-nowrap">{r.name}</td>
-                                            <td className="sticky left-[100px] bg-white z-10 px-4 py-2 text-xs border-r border-gray-200 whitespace-nowrap">
+                                            <td className="sticky left-0 bg-white z-10 px-4 py-2 text-xs font-bold text-gray-600 border-r border-gray-200 whitespace-nowrap w-[100px] truncate" title={r.region}>{r.region || "-"}</td>
+                                            <td className="sticky left-[100px] bg-white z-10 px-4 py-2 text-xs font-bold text-gray-600 border-r border-gray-200 whitespace-nowrap w-[100px] truncate" title={r.prefecture}>{r.prefecture || "-"}</td>
+                                            <td className="sticky left-[200px] bg-white z-10 px-4 py-2 text-xs font-bold text-gray-800 border-r border-gray-200 whitespace-nowrap w-[140px] truncate" title={r.name}>{r.name}</td>
+                                            <td className="sticky left-[340px] bg-white z-10 px-4 py-2 text-xs border-r border-gray-200 whitespace-nowrap">
                                                 <span className={`w-2 h-2 inline-block rounded-full ${r.isActive ? 'bg-green-500' : 'bg-gray-300'}`}></span>
                                             </td>
                                             {matrixHeaders.map(date => {

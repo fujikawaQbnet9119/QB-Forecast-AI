@@ -1,6 +1,9 @@
 
 export interface StoreData {
     name: string;
+    region?: string; // New: Kanto, Kansai, etc.
+    prefecture?: string; // New: Tokyo, Osaka, etc.
+    block?: string; // Company/Block grouping
     raw: number[];
     dates: string[];
     mask: boolean[];
@@ -9,8 +12,8 @@ export interface StoreData {
     nudgeDecay: number; // AR(1) autocorrelation coefficient
     seasonal: number[];
     components: { t: number[]; s: number[]; r: number[] };
-    params: { L: number; k: number; t0: number };
-    fit: { params: any; mode: 'standard' | 'shift' | 'recovery' | 'startup'; shockIdx: number; aic: number };
+    params: { L: number; k: number; t0: number; base: number; shift?: number; shift2?: number };
+    fit: { params: any; mode: 'standard' | 'shift' | 'dual_shift' | 'recovery' | 'startup'; shockIdx: number; shockIdx2?: number; aic: number };
     stdDev: number;
     cv: { logistic: number };
     error?: boolean;

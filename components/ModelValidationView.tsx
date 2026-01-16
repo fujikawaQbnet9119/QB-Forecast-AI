@@ -9,6 +9,7 @@ import {
 
 interface ModelValidationViewProps {
     allStores: { [name: string]: StoreData };
+    dataType: 'sales' | 'customers';
 }
 
 interface BacktestResult {
@@ -23,12 +24,14 @@ interface BacktestResult {
     trainingL: number;
 }
 
-const ModelValidationView: React.FC<ModelValidationViewProps> = ({ allStores }) => {
+const ModelValidationView: React.FC<ModelValidationViewProps> = ({ allStores, dataType }) => {
     const [isProcessing, setIsProcessing] = useState(false);
     const [progress, setProgress] = useState(0);
     const [results, setResults] = useState<BacktestResult[]>([]);
     const [selectedStore, setSelectedStore] = useState<BacktestResult | null>(null);
     const [searchTerm, setSearchTerm] = useState("");
+
+    const isSales = dataType === 'sales';
 
     // --- Backtest Execution Logic ---
     const runBacktest = async () => {
@@ -149,8 +152,8 @@ const ModelValidationView: React.FC<ModelValidationViewProps> = ({ allStores }) 
         const sortedMape = [...results].sort((a,b) => a.mape - b.mape);
         const medianMape = sortedMape[Math.floor(results.length / 2)].mape;
         
-        // Count "Good" Forecasts (<10% error)
-        const goodCount = results.filter(r => r.mape < 10).length;
+        // Count "Good" Forecasts (<7.5% error) - UPDATED THRESHOLD
+        const goodCount = results.filter(r => r.mape < 7.5).length;
         const goodRate = (goodCount / results.length) * 100;
 
         // Bias (Total Bias)
@@ -218,7 +221,7 @@ const ModelValidationView: React.FC<ModelValidationViewProps> = ({ allStores }) 
                         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                             <div className="bg-white p-5 rounded-2xl shadow-sm border border-gray-100 text-center">
                                 <p className="text-[10px] text-gray-400 font-black uppercase tracking-widest mb-1">平均誤差率 (Avg MAPE)</p>
-                                <p className={`text-3xl font-black font-display ${globalMetrics.avgMape < 10 ? 'text-green-500' : 'text-orange-500'}`}>
+                                <p className={`text-3xl font-black font-display ${globalMetrics.avgMape < 7.5 ? 'text-green-500' : 'text-orange-500'}`}>
                                     {globalMetrics.avgMape.toFixed(1)}<span className="text-sm">%</span>
                                 </p>
                             </div>
@@ -229,7 +232,7 @@ const ModelValidationView: React.FC<ModelValidationViewProps> = ({ allStores }) 
                                 </p>
                             </div>
                             <div className="bg-white p-5 rounded-2xl shadow-sm border border-gray-100 text-center">
-                                <p className="text-[10px] text-gray-400 font-black uppercase tracking-widest mb-1">高精度店舗率 (Error &lt; 10%)</p>
+                                <p className="text-[10px] text-gray-400 font-black uppercase tracking-widest mb-1">高精度店舗率 (Error &lt; 7.5%)</p>
                                 <p className="text-3xl font-black font-display text-gray-800">
                                     {globalMetrics.goodRate.toFixed(1)}<span className="text-sm">%</span>
                                 </p>
@@ -255,6 +258,8 @@ const ModelValidationView: React.FC<ModelValidationViewProps> = ({ allStores }) 
                                         <YAxis tick={{fontSize:9}} allowDecimals={false} />
                                         <Tooltip cursor={{fill: '#f3f4f6'}} contentStyle={{borderRadius:'12px', border:'none', boxShadow:'0 10px 15px -3px rgba(0,0,0,0.1)'}} />
                                         <Bar dataKey="count" fill="#005EB8" radius={[4, 4, 0, 0]} name="店舗数" />
+                                        {/* Reference Line for 7.5% threshold is between 5-10% bucket */}
+                                        <ReferenceLine x="5-10%" stroke="#10B981" strokeDasharray="3 3" label={{ value: 'Target (7.5%)', position: 'top', fontSize: 9, fill: '#10B981' }} />
                                     </BarChart>
                                 </ResponsiveContainer>
                             </div>
@@ -321,7 +326,7 @@ const ModelValidationView: React.FC<ModelValidationViewProps> = ({ allStores }) 
                                                 className={`cursor-pointer transition-colors ${selectedStore?.name === r.name ? 'bg-blue-50' : 'hover:bg-gray-50'}`}
                                             >
                                                 <td className="p-3 font-bold text-gray-700">{r.name}</td>
-                                                <td className={`p-3 font-bold text-right ${r.mape < 10 ? 'text-green-600' : r.mape > 20 ? 'text-red-500' : 'text-orange-500'}`}>
+                                                <td className={`p-3 font-bold text-right ${r.mape < 7.5 ? 'text-green-600' : r.mape > 20 ? 'text-red-500' : 'text-orange-500'}`}>
                                                     {r.mape.toFixed(1)}%
                                                 </td>
                                                 <td className="p-3 font-mono text-right text-gray-500">

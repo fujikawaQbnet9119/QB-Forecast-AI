@@ -3,6 +3,7 @@ import React, { useState } from 'react';
 import Sidebar from './components/Sidebar';
 import DataView from './components/DataView';
 import DashboardView from './components/DashboardView';
+import RegionalView from './components/RegionalView';
 import StoreAnalysisView from './components/StoreAnalysisView';
 import AnalyticsView from './components/AnalyticsView';
 import ModelLogicView from './components/ModelLogicView';
@@ -10,14 +11,18 @@ import GuideView from './components/GuideView';
 import ComparisonView from './components/ComparisonView';
 import StoreTableView from './components/StoreTableView';
 import ModelValidationView from './components/ModelValidationView';
+import SimulationView from './components/SimulationView';
 import { StoreData } from './types';
 
 const App: React.FC = () => {
-    const [currentView, setCurrentView] = useState<'data' | 'dashboard' | 'analytics' | 'bench' | 'store' | 'table' | 'logic' | 'guide' | 'validate'>('data');
+    const [currentView, setCurrentView] = useState<'data' | 'dashboard' | 'region' | 'analytics' | 'bench' | 'store' | 'simulation' | 'table' | 'logic' | 'guide' | 'validate'>('data');
     const [allStores, setAllStores] = useState<{ [name: string]: StoreData }>({});
     const [globalMaxDate, setGlobalMaxDate] = useState<Date>(new Date());
     const [forecastMonths, setForecastMonths] = useState(36);
     const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+    
+    // Global Data Type State: 'sales' (Default) or 'customers'
+    const [dataType, setDataType] = useState<'sales' | 'customers'>('sales');
 
     return (
         <div className="flex h-screen w-full bg-[#F8FAFC] text-[#1A1A1A] overflow-hidden">
@@ -46,6 +51,8 @@ const App: React.FC = () => {
                         setGlobalMaxDate={setGlobalMaxDate}
                         forecastMonths={forecastMonths}
                         setForecastMonths={setForecastMonths}
+                        dataType={dataType}
+                        setDataType={setDataType}
                         onComplete={() => setCurrentView('dashboard')}
                     />
                 )}
@@ -53,32 +60,50 @@ const App: React.FC = () => {
                     <DashboardView 
                         allStores={allStores}
                         forecastMonths={forecastMonths}
+                        dataType={dataType}
+                    />
+                )}
+                {currentView === 'region' && (
+                    <RegionalView 
+                        allStores={allStores}
+                        dataType={dataType}
                     />
                 )}
                 {currentView === 'analytics' && (
                     <AnalyticsView 
                         allStores={allStores}
+                        dataType={dataType}
                     />
                 )}
                 {currentView === 'bench' && (
                     <ComparisonView 
                         allStores={allStores}
+                        dataType={dataType}
                     />
                 )}
                 {currentView === 'store' && (
                     <StoreAnalysisView 
                         allStores={allStores}
                         forecastMonths={forecastMonths}
+                        dataType={dataType}
+                    />
+                )}
+                {currentView === 'simulation' && (
+                    <SimulationView 
+                        allStores={allStores}
+                        dataType={dataType}
                     />
                 )}
                 {currentView === 'table' && (
                     <StoreTableView 
                         allStores={allStores}
+                        dataType={dataType}
                     />
                 )}
                 {currentView === 'validate' && (
                     <ModelValidationView 
                         allStores={allStores}
+                        dataType={dataType}
                     />
                 )}
                 {currentView === 'logic' && (
