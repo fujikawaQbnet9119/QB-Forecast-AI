@@ -1,12 +1,12 @@
 
-import React, { useMemo, useState, useCallback } from 'react';
-import { StoreData, BubblePoint } from '../types';
+import React, { useMemo, useState } from 'react';
+import { StoreData } from '../types';
 import { logisticModel } from '../services/analysisEngine';
 import HelpTooltip from './HelpTooltip';
 import {
     LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
-    ScatterChart, Scatter, ZAxis, Legend, Brush, ReferenceLine, Label,
-    AreaChart, Area, ComposedChart, Bar
+    ScatterChart, Scatter, ZAxis, Legend, Brush, ReferenceLine,
+    AreaChart, Area, ComposedChart, Bar, Cell, BarChart
 } from 'recharts';
 
 interface DashboardViewProps {
@@ -15,775 +15,701 @@ interface DashboardViewProps {
     dataType: 'sales' | 'customers';
 }
 
+// --- Helpers ---
+const calculateGini = (values: number[]) => {
+    if (values.length === 0) return 0;
+    const sorted = [...values].sort((a, b) => a - b);
+    const n = sorted.length;
+    let num = 0;
+    for (let i = 0; i < n; i++) num += (i + 1) * sorted[i];
+    const den = n * sorted.reduce((a, b) => a + b, 0);
+    return den === 0 ? 0 : (2 * num) / den - (n + 1) / n;
+};
+
+const get5YearCohort = (dateStr: string) => {
+    const year = new Date(dateStr.replace(/\//g, '-')).getFullYear();
+    if (year <= 2000) return "Before 2000";
+    if (year <= 2005) return "2001-2005";
+    if (year <= 2010) return "2006-2010";
+    if (year <= 2015) return "2011-2015";
+    if (year <= 2020) return "2016-2020";
+    return "2021-Present";
+};
+
+const COHORT_ORDER = ["Before 2000", "2001-2005", "2006-2010", "2011-2015", "2016-2020", "2021-Present"];
+const COHORT_COLORS: Record<string, string> = {
+    "Before 2000": "#334155", "2001-2005": "#475569", "2006-2010": "#64748b",
+    "2011-2015": "#005EB8", "2016-2020": "#3B82F6", "2021-Present": "#93C5FD"
+};
+
+// Component
 const DashboardView: React.FC<DashboardViewProps> = ({ allStores, forecastMonths, dataType }) => {
+    const [viewMode, setViewMode] = useState<'fiscal' | 'strategic'>('fiscal');
+    const [hiddenCohorts, setHiddenCohorts] = useState<Set<string>>(new Set());
+
     const stores = (Object.values(allStores) as StoreData[]).filter(s => !s.error);
     const activeStores = stores.filter(s => s.isActive);
-    const [disabledCohorts, setDisabledCohorts] = useState<string[]>([]);
-    const [showForecastTable, setShowForecastTable] = useState(true);
-    const [expandedChart, setExpandedChart] = useState<string | null>(null);
-
     const isSales = dataType === 'sales';
-    const unitLabel = isSales ? '売上 (千円)' : '客数 (人)';
-    const valueFormatter = (val: number) => val.toLocaleString() + (isSales ? '千円' : '人');
-    const totalUnitLabel = isSales ? '百万円' : '千人';
-    const totalValueDivider = isSales ? 1000 : 1000; // Both need /1000 to get M or K if base is thousands or units? 
-    // Wait, if Sales is "1000s Yen", then totalForecast(1000s) / 1000 = Million Yen.
-    // If Customers is "Persons", then totalForecast(Persons) / 1000 = Thousand Persons.
-    // So /1000 is correct for both to get "Million" or "Thousand".
-
-    const { 
-        chartData, 
-        totalForecast, 
-        bubbleData, 
-        vintageData, 
-        maxLen, 
-        qMedians, 
-        stackedAreaData, 
-        allCohorts, 
-        monthlyForecasts, 
-        axisDomains,
-        segmentedData, 
-        growthRateData 
-    } = useMemo(() => {
-        if (stores.length === 0) return { 
-            chartData: [], totalForecast: 0, bubbleData: [], vintageData: [], maxLen: 0, qMedians: {x:0, y:0},
-            stackedAreaData: [], allCohorts: [], monthlyForecasts: [], axisDomains: { x: ['auto', 'auto'], y: ['auto', 'auto'] },
-            segmentedData: [], growthRateData: []
-        };
-
-        // --- 1. Total Forecast Chart Data & Preparation ---
-        const dSet = new Set<string>();
-        stores.forEach(s => s.dates.forEach(d => dSet.add(d)));
-        const dates = Array.from(dSet).sort((a, b) => {
-            return new Date(a.replace(/\//g, '-')).getTime() - new Date(b.replace(/\//g, '-')).getTime();
-        });
+    const unitLabel = isSales ? '千円' : '人';
+    
+    // --- 1. Identify Data Range & Fiscal Year ---
+    const dateRangeInfo = useMemo(() => {
+        const allDates = new Set<string>();
+        stores.forEach(s => s.dates.forEach(d => allDates.add(d)));
+        const sortedDates = Array.from(allDates).sort((a, b) => new Date(a.replace(/\//g, '-')).getTime() - new Date(b.replace(/\//g, '-')).getTime());
         
-        // Helper to categorize stores
-        const isMature = (s: StoreData) => s.raw.length >= 36;
+        const lastDateStr = sortedDates[sortedDates.length - 1];
+        const lastDate = lastDateStr ? new Date(lastDateStr.replace(/\//g, '-')) : new Date();
+        
+        // Define Fiscal Year (July 1st Start - June 30th End)
+        let fyStartYear = lastDate.getFullYear();
+        if (lastDate.getMonth() < 6) fyStartYear -= 1; 
+        
+        const fyStartDate = new Date(fyStartYear, 6, 1); // July 1st
+        const fyEndDate = new Date(fyStartYear + 1, 5, 30); // June 30th next year
 
-        // Historical Data Aggregation
-        const histData = dates.map(d => {
-            let total = 0;
-            let mature = 0;
-            let young = 0;
+        return { sortedDates, lastDate, fyStartDate, fyEndDate, fyStartYear };
+    }, [stores]);
 
-            stores.forEach(s => {
-                const idx = s.dates.indexOf(d);
-                if (idx >= 0) {
-                    const val = s.raw[idx] || 0;
-                    total += val;
-                    if (isMature(s)) mature += val;
-                    else young += val;
-                }
-            });
-            return { 
-                date: d, 
-                actual: Math.round(total), 
-                forecast: null as number | null,
-                matureActual: Math.round(mature),
-                newActual: Math.round(young),
-                matureForecast: null as number | null,
-                newForecast: null as number | null
-            };
-        });
+    // --- 2. Aggregate Data (Both Strategic & Fiscal) ---
+    const aggregatedData = useMemo(() => {
+        const { sortedDates, lastDate, fyStartDate, fyEndDate } = dateRangeInfo;
+        
+        // --- A. Strategic Long-term Data ---
+        const combinedDates = [...sortedDates];
+        for(let i = 1; i <= forecastMonths; i++) {
+            const d = new Date(lastDate);
+            d.setMonth(d.getMonth() + i);
+            combinedDates.push(`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`);
+        }
 
-        const lastD = new Date(dates[dates.length - 1].replace(/\//g, '-'));
-        const forecastData = [];
-        let finalSum = 0;
-        const monthlyFs = [];
+        let runningCumulative = 0;
+        let cumulativeActual = 0;
 
-        // Combine history for lookups
-        const allPoints = [...histData];
-
-        for (let t = 1; t <= forecastMonths; t++) {
-            const fd = new Date(lastD);
-            fd.setMonth(lastD.getMonth() + t);
-            const label = `${fd.getFullYear()}-${String(fd.getMonth() + 1).padStart(2, '0')}`;
+        const strategicData = combinedDates.map(date => {
+            const dateObj = new Date(date.replace(/\//g, '-'));
+            const isFuture = dateObj > lastDate;
+            const pt: any = { date, isFuture, actualTotal: 0, forecastTotal: 0, budgetTotal: 0 };
             
-            let sum = 0;
-            let sumMature = 0;
-            let sumNew = 0;
+            COHORT_ORDER.forEach(c => pt[c] = 0);
 
             stores.forEach(s => {
-                if (!s.isActive) return;
-                const tr = logisticModel(s.raw.length + t - 1, s.fit.params, s.fit.mode, s.fit.shockIdx);
-                const decay = s.nudgeDecay !== undefined ? s.nudgeDecay : 0.7;
-                const seasonalVal = s.seasonal[fd.getMonth()] || 1.0;
-                const val = (tr * seasonalVal) + (s.nudge * Math.pow(decay, t));
-                const finalVal = val < 0 ? 0 : val;
+                const cLabel = get5YearCohort(s.dates[0]);
+                let val = 0;
+                let sBudget = 0;
+
+                // 1. Calculate Value (Actual or Forecast)
+                if (!isFuture) {
+                    const idx = s.dates.indexOf(date.replace(/-/g, '/')) !== -1 ? s.dates.indexOf(date.replace(/-/g, '/')) : s.dates.indexOf(date);
+                    if (idx !== -1) val = s.raw[idx];
+                } else {
+                    if (s.isActive) {
+                        const monthsDiff = (dateObj.getFullYear() - lastDate.getFullYear()) * 12 + (dateObj.getMonth() - lastDate.getMonth());
+                        const idx = s.raw.length + monthsDiff - 1;
+                        const tr = logisticModel(idx, s.fit.params, s.fit.mode, s.fit.shockIdx);
+                        const sea = s.seasonal[dateObj.getMonth()] || 1.0;
+                        const decay = s.nudgeDecay || 0.7;
+                        const nudge = s.nudge * Math.pow(decay, monthsDiff);
+                        val = Math.max(0, (tr + nudge) * sea);
+                    }
+                }
+
+                // 2. Budget Fallback Logic
+                const budgetKey = `${dateObj.getFullYear()}-${String(dateObj.getMonth()+1).padStart(2,'0')}`;
+                if (s.budget && s.budget[budgetKey] && s.budget[budgetKey] > 0) {
+                    sBudget = s.budget[budgetKey];
+                } else {
+                    // Fallback to Actual (Past) or Forecast (Future)
+                    sBudget = val;
+                }
+
+                if (!isFuture) pt.actualTotal += val;
+                else pt.forecastTotal += val;
                 
-                sum += finalVal;
-                if (isMature(s)) sumMature += finalVal;
-                else sumNew += finalVal;
+                pt.budgetTotal += sBudget;
+                pt[cLabel] += val;
             });
 
-            if (t === forecastMonths) finalSum = sum;
-            
-            // YoY Calculation
-            const lookbackIndex = allPoints.length - 12;
-            let prevVal = 0;
-            if (lookbackIndex >= 0) {
-                const p = allPoints[lookbackIndex];
-                prevVal = p.actual !== null ? p.actual : (p.forecast || 0);
+            pt.actual = !isFuture ? pt.actualTotal : null;
+            pt.forecast = isFuture ? pt.forecastTotal : null;
+            pt.budget = pt.budgetTotal > 0 ? pt.budgetTotal : null;
+
+            // Cumulative Calc
+            const currentVal = !isFuture ? pt.actualTotal : pt.forecastTotal;
+            runningCumulative += currentVal;
+            pt.cumulative = runningCumulative;
+
+            if (!isFuture) {
+                cumulativeActual = runningCumulative;
             }
-            
-            const yoy = prevVal > 0 ? ((sum - prevVal) / prevVal) : 0;
 
-            const point = { 
-                date: label, 
-                actual: null, 
-                forecast: Math.round(sum),
-                matureActual: null,
-                newActual: null,
-                matureForecast: Math.round(sumMature),
-                newForecast: Math.round(sumNew)
-            };
-
-            forecastData.push(point);
-            allPoints.push(point);
-            
-            monthlyFs.push({ date: label, val: Math.round(sum), yoy });
-        }
-
-        const combinedSegmented = [...histData, ...forecastData];
-
-        const growthRates = combinedSegmented.map((curr, i) => {
-            if (i < 12) return { date: curr.date, matureYoY: null, newYoY: null, totalYoY: null };
-            const prev = combinedSegmented[i - 12];
-            const currMature = curr.actual !== null ? curr.matureActual! : curr.matureForecast!;
-            const prevMature = prev.actual !== null ? prev.matureActual! : prev.matureForecast!;
-            const currNew = curr.actual !== null ? curr.newActual! : curr.newForecast!;
-            const prevNew = prev.actual !== null ? prev.newActual! : prev.newForecast!;
-            const currTotal = curr.actual !== null ? curr.actual! : curr.forecast!;
-            const prevTotal = prev.actual !== null ? prev.actual! : prev.forecast!;
-
-            return {
-                date: curr.date,
-                matureYoY: prevMature > 0 ? Number(((currMature - prevMature) / prevMature * 100).toFixed(1)) : 0,
-                newYoY: prevNew > 0 ? Number(((currNew - prevNew) / prevNew * 100).toFixed(1)) : 0,
-                totalYoY: prevTotal > 0 ? Number(((currTotal - prevTotal) / prevTotal * 100).toFixed(1)) : 0
-            };
-        }).filter((_, i) => i >= 12);
-
-
-        // --- Portfolio Analysis ---
-        let points = activeStores
-            .filter(s => s.fit.mode !== 'startup')
-            .map(s => ({
-            x: s.params.k,
-            y: s.params.L,
-            z: 100,
-            name: s.name,
-            cluster: 0,
-            nx: 0, ny: 0
-        }));
-
-        let qMx = 0.1, qMy = 1000;
-        let xDomain: any[] = ['auto', 'auto'];
-        let yDomain: any[] = ['auto', 'auto'];
-
-        if (points.length > 0) {
-            const absMinX = Math.min(...points.map(p => p.x));
-            const absMaxX = Math.max(...points.map(p => p.x));
-            const absMinY = Math.min(...points.map(p => p.y));
-            const absMaxY = Math.max(...points.map(p => p.y));
-
-            const sortedXVals = points.map(p => p.x).sort((a, b) => a - b);
-            const sortedYVals = points.map(p => p.y).sort((a, b) => a - b);
-            
-            const idx5 = Math.floor(points.length * 0.05);
-            const idx70 = Math.floor(points.length * 0.70);
-            
-            let coreMinX = sortedXVals[idx5] !== undefined ? sortedXVals[idx5] : absMinX;
-            let coreMaxX = sortedXVals[idx70] !== undefined ? sortedXVals[idx70] : absMaxX;
-            let coreMinY = sortedYVals[idx5] !== undefined ? sortedYVals[idx5] : absMinY;
-            let coreMaxY = sortedYVals[idx70] !== undefined ? sortedYVals[idx70] : absMaxY;
-
-            if (coreMaxX <= coreMinX) { coreMinX = absMinX; coreMaxX = absMaxX; }
-            if (coreMaxY <= coreMinY) { coreMinY = absMinY; coreMaxY = absMaxY; }
-            
-            const paddingX = (coreMaxX - coreMinX) * 0.05;
-            const paddingY = (coreMaxY - coreMinY) * 0.05;
-            
-            xDomain = [0, coreMaxX + paddingX];
-            yDomain = [Math.max(0, coreMinY - paddingY), coreMaxY + paddingY];
-
-            const rangeX = absMaxX - absMinX || 1;
-            const rangeY = absMaxY - absMinY || 1;
-
-            points = points.map(p => ({
-                ...p,
-                nx: (p.x - absMinX) / rangeX,
-                ny: (p.y - absMinY) / rangeY
-            }));
-
-            const sortedX = [...points].sort((a,b)=>a.x-b.x);
-            const sortedY = [...points].sort((a,b)=>a.y-b.y);
-            qMx = sortedX[Math.floor(sortedX.length/2)].x;
-            qMy = sortedY[Math.floor(sortedY.length/2)].y;
-
-            const sortedNx = [...points].map(p => p.nx).sort((a,b)=>a-b);
-            const sortedNy = [...points].map(p => p.ny).sort((a,b)=>a-b);
-            let centroids = [
-                { nx: sortedNx[Math.floor(sortedNx.length * 0.25)] || 0.25, ny: sortedNy[Math.floor(sortedNy.length * 0.25)] || 0.25 },
-                { nx: sortedNx[Math.floor(sortedNx.length * 0.75)] || 0.75, ny: sortedNy[Math.floor(sortedNy.length * 0.25)] || 0.25 },
-                { nx: sortedNx[Math.floor(sortedNx.length * 0.25)] || 0.25, ny: sortedNy[Math.floor(sortedNy.length * 0.75)] || 0.75 },
-                { nx: sortedNx[Math.floor(sortedNx.length * 0.75)] || 0.75, ny: sortedNy[Math.floor(sortedNy.length * 0.75)] || 0.75 }
-            ];
-
-            for (let iter = 0; iter < 20; iter++) {
-                points.forEach(p => {
-                    let minDist = Infinity;
-                    let clusterIdx = 0;
-                    centroids.forEach((c, idx) => {
-                        const dist = (p.nx - c.nx) ** 2 + (p.ny - c.ny) ** 2;
-                        if (dist < minDist) { minDist = dist; clusterIdx = idx; }
-                    });
-                    p.cluster = clusterIdx;
-                });
-                const newCentroids = centroids.map(() => ({ nx: 0, ny: 0, count: 0 }));
-                points.forEach(p => {
-                    newCentroids[p.cluster].nx += p.nx;
-                    newCentroids[p.cluster].ny += p.ny;
-                    newCentroids[p.cluster].count++;
-                });
-                centroids = newCentroids.map((c, i) => c.count === 0 ? centroids[i] : { nx: c.nx / c.count, ny: c.ny / c.count });
-            }
-        }
-
-        const bubbles: BubblePoint[] = points.map(p => ({ x: p.x, y: p.y, z: p.z, name: p.name, cluster: p.cluster }));
-
-        // --- Vintage Analysis ---
-        const cohorts: { [key: string]: { s: number[], c: number[] } } = {};
-        let maxL = 0;
-        stores.forEach(s => {
-            if(!s.dates[0]) return;
-            const y = new Date(s.dates[0].replace(/\//g, '-')).getFullYear();
-            const key = `${Math.floor(y / 5) * 5}s組`;
-            if (!cohorts[key]) cohorts[key] = { s: [], c: [] };
-            
-            s.raw.forEach((v, i) => {
-                if (v > 0) {
-                    if (cohorts[key].s[i] === undefined) { cohorts[key].s[i] = 0; cohorts[key].c[i] = 0; }
-                    cohorts[key].s[i] += v;
-                    cohorts[key].c[i]++;
-                }
-            });
-            if (s.raw.length > maxL) maxL = s.raw.length;
-        });
-
-        const vData = Array.from({ length: maxL }, (_, i) => {
-            const pt: any = { period: `${i + 1}ヶ月` };
-            Object.keys(cohorts).forEach(k => {
-                pt[k] = (cohorts[k].c[i] >= 5) ? Math.round(cohorts[k].s[i] / cohorts[k].c[i]) : null;
-            });
             return pt;
         });
 
-        // --- Stacked Area ---
-        const vintageMap: Record<string, StoreData[]> = {};
-        const vSet = new Set<string>();
+        // --- B. Fiscal Year Data (Current Term: July-June) ---
+        const fyMonths: string[] = [];
+        let curr = new Date(fyStartDate);
+        while (curr <= fyEndDate) {
+            fyMonths.push(`${curr.getFullYear()}-${String(curr.getMonth()+1).padStart(2,'0')}`);
+            curr.setMonth(curr.getMonth() + 1);
+        }
+
+        let fyCumActual = 0;
+        let fyCumBudget = 0;
+        let fyCumForecast = 0;
+        let fyCumLastYear = 0;
         
-        stores.forEach(s => {
-            if(s.dates.length === 0) return;
-            const d = new Date(s.dates[0].replace(/\//g, '-'));
-            if(isNaN(d.getTime())) return;
-            const y = d.getFullYear();
-            const k = `${Math.floor(y/5)*5}年代`;
-            vSet.add(k);
-            if(!vintageMap[k]) vintageMap[k] = [];
-            vintageMap[k].push(s);
+        const fyChartData = fyMonths.map(month => {
+            let mActual = 0;
+            let mBudget = 0;
+            let mForecast = 0;
+            let mLastYear = 0;
+            let hasActual = false;
+
+            const dateObj = new Date(month + '-01');
+            const prevYearDate = new Date(dateObj);
+            prevYearDate.setFullYear(dateObj.getFullYear() - 1);
+            const prevYearMonth = `${prevYearDate.getFullYear()}-${String(prevYearDate.getMonth()+1).padStart(2,'0')}`;
+
+            const isPastOrPresent = dateObj <= lastDate;
+
+            stores.forEach(s => {
+                let sActual = 0;
+                let sForecast = 0;
+                
+                // 1. Actual
+                if (isPastOrPresent) {
+                    const idx = s.dates.indexOf(month.replace(/-/g, '/')) !== -1 ? s.dates.indexOf(month.replace(/-/g, '/')) : s.dates.indexOf(month);
+                    if (idx !== -1) {
+                        sActual = s.raw[idx];
+                        mActual += sActual;
+                        hasActual = true;
+                    }
+                } 
+                
+                // 2. Forecast (needed for future budget fallback)
+                if (!isPastOrPresent && s.isActive) {
+                    const monthsDiff = (dateObj.getFullYear() - lastDate.getFullYear()) * 12 + (dateObj.getMonth() - lastDate.getMonth());
+                    const idx = s.raw.length + monthsDiff - 1;
+                    const tr = logisticModel(idx, s.fit.params, s.fit.mode, s.fit.shockIdx);
+                    const sea = s.seasonal[dateObj.getMonth()] || 1.0;
+                    const decay = s.nudgeDecay || 0.7;
+                    const nudge = s.nudge * Math.pow(decay, monthsDiff);
+                    sForecast = Math.max(0, (tr + nudge) * sea);
+                    
+                    // Accumulate to total forecast
+                    mForecast += sForecast;
+                } else if (isPastOrPresent) {
+                    // For past, forecast tracks actual
+                    sForecast = sActual;
+                }
+
+                // 3. Budget with Fallback Logic
+                // If budget is missing or 0, use Actual (Past) or Forecast (Future) to prevent skewed achievement rates
+                if (s.budget && s.budget[month] && s.budget[month] > 0) {
+                    mBudget += s.budget[month];
+                } else {
+                    mBudget += isPastOrPresent ? sActual : sForecast;
+                }
+
+                // 4. Last Year
+                const idxLY = s.dates.indexOf(prevYearMonth.replace(/-/g, '/')) !== -1 ? s.dates.indexOf(prevYearMonth.replace(/-/g, '/')) : s.dates.indexOf(prevYearMonth);
+                if (idxLY !== -1) mLastYear += s.raw[idxLY];
+            });
+
+            if (isPastOrPresent) {
+                mForecast = mActual;
+            }
+
+            if (hasActual) fyCumActual += mActual;
+            fyCumBudget += mBudget;
+            fyCumForecast += (hasActual ? mActual : mForecast);
+            fyCumLastYear += mLastYear;
+
+            return {
+                month,
+                actual: hasActual ? mActual : null,
+                budget: mBudget,
+                lastYear: mLastYear,
+                forecast: hasActual ? null : Math.round(mForecast),
+                cumActual: hasActual ? fyCumActual : null,
+                cumBudget: fyCumBudget,
+                cumLastYear: fyCumLastYear,
+                cumForecast: fyCumForecast,
+                diff: hasActual ? mActual - mBudget : null,
+                yoy: mLastYear > 0 ? ((mActual - mLastYear) / mLastYear) * 100 : null,
+                isClosed: hasActual
+            };
         });
+
+        // --- C. KPIs Calculation ---
+        let lastClosedMonthIdx = -1;
+        for (let i = fyChartData.length - 1; i >= 0; i--) {
+            if (fyChartData[i].isClosed) {
+                lastClosedMonthIdx = i;
+                break;
+            }
+        }
         
-        const sortedCohorts = Array.from(vSet).sort();
+        const currentProgress = fyChartData[lastClosedMonthIdx];
+        const landingPrediction = fyChartData[fyChartData.length - 1]; // End of FY
+
+        const totalBudgetFY = landingPrediction.cumBudget;
+        const totalForecastFY = landingPrediction.cumForecast;
         
-        const areaData = dates.map(date => {
-            const p: any = { date };
-            sortedCohorts.forEach(c => {
-                let sum = 0;
-                vintageMap[c].forEach(s => {
-                    const idx = s.dates.indexOf(date);
-                    if(idx !== -1) sum += (s.raw[idx] || 0);
-                });
-                p[c] = Math.round(sum);
+        // Expanded Fiscal KPIs
+        const ytdLastYear = currentProgress?.cumLastYear || 0;
+        const ytdYoY = ytdLastYear > 0 ? (( (currentProgress?.cumActual || 0) - ytdLastYear) / ytdLastYear) * 100 : 0;
+        
+        const totalLastYearFY = landingPrediction.cumLastYear;
+        const landingYoY = totalLastYearFY > 0 ? ((totalForecastFY - totalLastYearFY) / totalLastYearFY) * 100 : 0;
+
+        // Strategic KPIs
+        const totalStoreCount = stores.length;
+        const activeStoreCount = activeStores.length;
+        const gini = calculateGini(activeStores.map(s => s.stats?.lastYearSales || 0));
+        
+        // Vintage Growth Curve
+        const vGroups: Record<string, { sums: number[], counts: number[] }> = {};
+        stores.forEach(s => {
+            const cLabel = get5YearCohort(s.dates[0]);
+            if(!vGroups[cLabel]) vGroups[cLabel] = { sums: Array(60).fill(0), counts: Array(60).fill(0) };
+            s.raw.forEach((v, i) => { 
+                if(i<60) {
+                    vGroups[cLabel].sums[i] += v;
+                    vGroups[cLabel].counts[i]++;
+                }
+            });
+        });
+        const vintageCurveData = Array.from({length:60}, (_,i) => {
+            const p: any = { period: i+1 };
+            Object.keys(vGroups).forEach(k => {
+                if (vGroups[k].counts[i] >= 1) {
+                    p[k] = Math.round(vGroups[k].sums[i] / vGroups[k].counts[i]);
+                }
             });
             return p;
         });
 
         return {
-            chartData: [...histData, ...forecastData],
-            totalForecast: Math.round(finalSum),
-            bubbleData: bubbles,
-            vintageData: vData,
-            maxLen: maxL,
-            qMedians: { x: qMx, y: qMy },
-            stackedAreaData: areaData,
-            allCohorts: sortedCohorts,
-            monthlyForecasts: monthlyFs,
-            axisDomains: { x: xDomain, y: yDomain },
-            segmentedData: combinedSegmented,
-            growthRateData: growthRates
+            strategicData,
+            fyChartData,
+            vintageCurveData,
+            kpis: {
+                // Fiscal
+                fyLabel: `${dateRangeInfo.fyStartYear}年度 (Jul-Jun)`,
+                currentMonth: currentProgress?.month,
+                
+                // Budget KPIs
+                ytdActual: currentProgress?.cumActual || 0,
+                ytdBudget: currentProgress?.cumBudget || 0,
+                ytdDiff: (currentProgress?.cumActual || 0) - (currentProgress?.cumBudget || 0),
+                ytdAchievement: (currentProgress?.cumBudget || 0) > 0 ? ((currentProgress?.cumActual || 0) / currentProgress!.cumBudget) * 100 : 0,
+                
+                // YoY KPIs
+                ytdLastYear,
+                ytdYoY,
+                landingLastYear: totalLastYearFY,
+                landingYoY,
+
+                // Forecast & Landing
+                landingForecast: totalForecastFY,
+                landingBudget: totalBudgetFY,
+                landingDiff: totalForecastFY - totalBudgetFY,
+                landingAchievement: totalBudgetFY > 0 ? (totalForecastFY / totalBudgetFY) * 100 : 0,
+                remainingBudget: totalBudgetFY - (currentProgress?.cumActual || 0),
+                
+                // Strategic
+                totalStoreCount,
+                activeStoreCount,
+                gini,
+                avgAge: activeStores.reduce((a,s)=>a+s.raw.length,0)/activeStores.length,
+                abcA: activeStores.filter(s=>s.stats?.abcRank==='A').length,
+                cumulativeActual
+            },
+            bubbleData: activeStores.map(s => ({ x: Number(s.params.k.toFixed(3)), y: Math.round(s.params.L), z: Math.round(s.stats?.lastYearSales || 0), name: s.name, cluster: s.raw.length < 24 ? 1 : 0 })),
         };
-    }, [stores, forecastMonths, activeStores]);
 
-    const handleDownloadCSV = () => {
-        if (stores.length === 0) return;
-        const dSet = new Set<string>();
-        stores.forEach(s => s.dates.forEach(d => dSet.add(d)));
-        const dates = Array.from(dSet).sort((a, b) => {
-            return new Date(a.replace(/\//g, '-')).getTime() - new Date(b.replace(/\//g, '-')).getTime();
-        });
-        const lastD = new Date(dates[dates.length - 1].replace(/\//g, '-'));
-        
-        const forecastHeaders: string[] = [];
-        const forecastDates: Date[] = [];
-        for (let t = 1; t <= forecastMonths; t++) {
-            const fd = new Date(lastD);
-            fd.setMonth(lastD.getMonth() + t);
-            const label = `${fd.getFullYear()}-${String(fd.getMonth() + 1).padStart(2, '0')}`;
-            forecastHeaders.push(label);
-            forecastDates.push(fd);
-        }
+    }, [stores, activeStores, forecastMonths, dateRangeInfo]);
 
-        let csvContent = "店舗名," + forecastHeaders.join(",") + "\n";
-        activeStores.forEach(s => {
-            const row: string[] = [s.name];
-            for (let t = 1; t <= forecastMonths; t++) {
-                const tr = logisticModel(s.raw.length + t - 1, s.fit.params, s.fit.mode, s.fit.shockIdx);
-                const monthIndex = forecastDates[t-1].getMonth();
-                const seasonal = s.seasonal[monthIndex] || 1.0;
-                const decay = s.nudgeDecay !== undefined ? s.nudgeDecay : 0.7;
-                let val = (tr * seasonal) + (s.nudge * Math.pow(decay, t));
-                if (val < 0) val = 0;
-                row.push(val.toFixed(0)); // Integer output
-            }
-            csvContent += row.join(",") + "\n";
-        });
+    const { kpis, fyChartData, strategicData, vintageCurveData, bubbleData } = aggregatedData;
 
-        const blob = new Blob([new Uint8Array([0xEF, 0xBB, 0xBF]), csvContent], { type: 'text/csv;charset=utf-8;' });
-        const link = document.createElement("a");
-        const url = URL.createObjectURL(blob);
-        link.setAttribute("href", url);
-        link.setAttribute("download", `qb_forecast_${dataType}_${new Date().toISOString().slice(0,10)}.csv`);
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-    };
+    // --- Components ---
+    const KpiCard = ({ title, value, sub, color = "border-t-[#005EB8]", unit="", delay="", tooltip }: any) => (
+        <div className={`bg-white p-4 rounded-2xl shadow-sm border border-gray-100 border-t-4 ${color} flex flex-col justify-between h-full hover:shadow-md transition-shadow animate-entry card-hover ${delay}`}>
+            <div>
+                <p className="text-[9px] text-gray-400 font-black uppercase mb-1 tracking-widest flex items-center gap-1">
+                    {title}
+                    {tooltip && <HelpTooltip title={title} content={tooltip} />}
+                </p>
+                <div className="flex items-baseline gap-1">
+                    <h3 className="text-xl font-black text-gray-800 font-display">{value}</h3>
+                    <span className="text-[10px] text-gray-500 font-bold">{unit}</span>
+                </div>
+            </div>
+            {sub && <p className="text-[9px] text-gray-400 font-bold mt-2 border-t border-gray-50 pt-2">{sub}</p>}
+        </div>
+    );
 
-    const clusterColors = ['#005EB8', '#F59E0B', '#10B981', '#EF4444'];
-    const vintageColors = ['#1e3a8a', '#1d4ed8', '#2563eb', '#3b82f6', '#60a5fa', '#93c5fd', '#bfdbfe', '#dbeafe'];
-
-    const toggleCohort = (c: string) => {
-        setDisabledCohorts(prev => prev.includes(c) ? prev.filter(x => x !== c) : [...prev, c]);
-    };
-
-    // --- Render Functions for Charts ---
-    const renderForecastChart = useCallback(() => (
-        <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={chartData} margin={{ top: 10, right: 10, bottom: 0, left: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E2E8F0" />
-                <XAxis dataKey="date" tick={{fontSize: 9}} tickMargin={10} minTickGap={30} />
-                <YAxis tick={{fontSize: 9}} label={{ value: unitLabel, angle: -90, position: 'left', offset: 0, fontSize: 9 }} />
-                <Tooltip formatter={valueFormatter} contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)' }} />
-                <Line type="monotone" dataKey="actual" name="実績" stroke="#1A1A1A" strokeWidth={2} dot={false} isAnimationActive={false} />
-                <Line type="monotone" dataKey="forecast" name="予測" stroke="#005EB8" strokeWidth={2} strokeDasharray="5 5" dot={false} />
-                <Brush dataKey="date" height={20} stroke="#cbd5e1" fill="#f8fafc" />
-                <Legend wrapperStyle={{ fontSize: '9px', paddingTop: '10px' }} iconSize={8} />
-            </LineChart>
-        </ResponsiveContainer>
-    ), [chartData, unitLabel, valueFormatter]);
-
-    const renderSegmentedSalesChart = useCallback(() => (
-        <ResponsiveContainer width="100%" height="100%">
-            <AreaChart data={segmentedData} margin={{ top: 10, right: 10, bottom: 0, left: 0 }}>
-                <defs>
-                    <linearGradient id="colorMature" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="5%" stopColor="#005EB8" stopOpacity={0.8}/>
-                        <stop offset="95%" stopColor="#005EB8" stopOpacity={0.1}/>
-                    </linearGradient>
-                    <linearGradient id="colorNew" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="5%" stopColor="#F59E0B" stopOpacity={0.8}/>
-                        <stop offset="95%" stopColor="#F59E0B" stopOpacity={0.1}/>
-                    </linearGradient>
-                </defs>
-                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E2E8F0" />
-                <XAxis dataKey="date" tick={{fontSize: 9}} minTickGap={30} />
-                <YAxis tick={{fontSize: 9}} label={{ value: unitLabel, angle: -90, position: 'left', offset: 0, fontSize: 9 }} />
-                <Tooltip formatter={valueFormatter} contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)' }} />
-                <Area type="monotone" dataKey="matureActual" stackId="1" stroke="#005EB8" fill="url(#colorMature)" name="実績 (3年以上)" />
-                <Area type="monotone" dataKey="newActual" stackId="1" stroke="#F59E0B" fill="url(#colorNew)" name="実績 (3年未満)" />
-                <Area type="monotone" dataKey="matureForecast" stackId="1" stroke="#005EB8" strokeDasharray="5 5" fill="url(#colorMature)" fillOpacity={0.5} name="予測 (3年以上)" />
-                <Area type="monotone" dataKey="newForecast" stackId="1" stroke="#F59E0B" strokeDasharray="5 5" fill="url(#colorNew)" fillOpacity={0.5} name="予測 (3年未満)" />
-                <Legend wrapperStyle={{ fontSize: '9px', paddingTop: '10px' }} iconSize={8} />
-            </AreaChart>
-        </ResponsiveContainer>
-    ), [segmentedData, unitLabel, valueFormatter]);
-
-    const renderGrowthRateChart = useCallback(() => (
-        <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={growthRateData} margin={{ top: 10, right: 10, bottom: 0, left: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E2E8F0" />
-                <XAxis dataKey="date" tick={{fontSize: 9}} minTickGap={30} />
-                <YAxis tick={{fontSize: 9}} unit="%" />
-                <Tooltip formatter={(val: number) => val.toFixed(1) + '%'} contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)' }} />
-                <ReferenceLine y={0} stroke="#000" />
-                <Line type="monotone" dataKey="matureYoY" stroke="#005EB8" strokeWidth={2} dot={false} name="YoY (3年以上)" />
-                <Line type="monotone" dataKey="newYoY" stroke="#F59E0B" strokeWidth={2} dot={false} name="YoY (3年未満)" />
-                <Line type="monotone" dataKey="totalYoY" stroke="#10B981" strokeWidth={1} strokeDasharray="3 3" dot={false} name="全社YoY" />
-                <Legend wrapperStyle={{ fontSize: '9px', paddingTop: '10px' }} iconSize={8} />
-            </LineChart>
-        </ResponsiveContainer>
-    ), [growthRateData]);
-
-    const renderPortfolioChart = useCallback(() => (
-        <ResponsiveContainer width="100%" height="100%">
-            <ScatterChart margin={{ top: 20, right: 20, bottom: 20, left: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0" />
-                <XAxis 
-                    type="number" 
-                    dataKey="x" 
-                    name="成長率 (k)" 
-                    domain={axisDomains.x} 
-                    allowDataOverflow={true}
-                    tick={{fontSize: 9}} 
-                    tickFormatter={(v) => v.toFixed(3)}
-                    label={{ value: '成長速度 (k) →', position: 'bottom', offset: 0, fontSize: 9, fontWeight: 900 }} 
-                />
-                <YAxis 
-                    type="number" 
-                    dataKey="y" 
-                    name={`潜在需要 (L) [${isSales ? '千円' : '人'}]`}
-                    domain={axisDomains.y}
-                    allowDataOverflow={true}
-                    tick={{fontSize: 9}} 
-                    label={{ value: `潜在需要 (L) [${isSales ? '千円' : '人'}] →`, angle: -90, position: 'left', offset: 0, fontSize: 9, fontWeight: 900 }} 
-                />
-                <ZAxis type="number" dataKey="z" range={[50, 400]} />
-                <Tooltip cursor={{ strokeDasharray: '3 3' }} content={({ active, payload }) => {
-                    if (active && payload && payload.length) {
-                        const data = payload[0].payload;
-                        return (
-                            <div className="bg-white p-3 border rounded shadow-lg text-xs z-50">
-                                <p className="font-black text-[#005EB8] mb-1">{data.name}</p>
-                                <p>Cluster: {data.cluster + 1}</p>
-                                <div className="mt-1 border-t pt-1">
-                                    <p>成長率(k): {data.x.toFixed(3)}</p>
-                                    <p>潜在力(L): {Math.round(data.y).toLocaleString()}{isSales ? '千円' : '人'}</p>
-                                </div>
-                            </div>
-                        );
-                    }
-                    return null;
-                }} />
-                <ReferenceLine x={qMedians.x} stroke="gray" strokeDasharray="3 3" />
-                <ReferenceLine y={qMedians.y} stroke="gray" strokeDasharray="3 3" />
-                {clusterColors.map((color, i) => (
-                    <Scatter key={i} name={`Cluster ${i+1}`} data={bubbleData.filter(d => d.cluster === i)} fill={color} fillOpacity={0.7} />
-                ))}
-                <Legend wrapperStyle={{ fontSize: '9px', paddingTop: '10px' }} iconSize={8} />
-            </ScatterChart>
-        </ResponsiveContainer>
-    ), [bubbleData, axisDomains, qMedians, isSales]);
-
-    const renderStackedAreaChart = useCallback(() => (
-        <ResponsiveContainer width="100%" height="100%">
-            <AreaChart data={stackedAreaData} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
-                <defs>
-                    {allCohorts.map((cohort, i) => (
-                        <linearGradient key={cohort} id={`color${i}`} x1="0" y1="0" x2="0" y2="1">
-                            <stop offset="5%" stopColor={vintageColors[i % vintageColors.length]} stopOpacity={0.8}/>
-                            <stop offset="95%" stopColor={vintageColors[i % vintageColors.length]} stopOpacity={0.1}/>
-                        </linearGradient>
-                    ))}
-                </defs>
-                <XAxis dataKey="date" tick={{fontSize: 9}} minTickGap={30} />
-                <YAxis tick={{fontSize: 9}} label={{ value: unitLabel, angle: -90, position: 'left', offset: 0, fontSize: 9 }} />
-                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E2E8F0" />
-                <Tooltip formatter={valueFormatter} contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)' }} />
-                {allCohorts.map((cohort, i) => (
-                    !disabledCohorts.includes(cohort) && (
-                        <Area
-                            key={cohort}
-                            type="monotone"
-                            dataKey={cohort}
-                            stackId="1"
-                            stroke={vintageColors[i % vintageColors.length]}
-                            fill={`url(#color${i})`}
-                            animationDuration={500}
-                        />
-                    )
-                ))}
-            </AreaChart>
-        </ResponsiveContainer>
-    ), [stackedAreaData, allCohorts, disabledCohorts, unitLabel, valueFormatter]);
-
-    const renderVintageChart = useCallback(() => (
-        <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={vintageData} margin={{ top: 10, right: 10, bottom: 0, left: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E2E8F0" />
-                <XAxis dataKey="period" tick={{fontSize: 9}} minTickGap={30} />
-                <YAxis tick={{fontSize: 9}} label={{ value: `平均${isSales ? '売上' : '客数'}`, angle: -90, position: 'left', offset: 0, fontSize: 9 }} />
-                <Tooltip formatter={valueFormatter} />
-                <Legend wrapperStyle={{ fontSize: '9px', paddingTop: '10px' }} iconSize={8} />
-                {Object.keys(vintageData[0] || {}).filter(k => k !== 'period').map((key, i) => (
-                    <Line 
-                        key={key} 
-                        type="monotone" 
-                        dataKey={key} 
-                        stroke={['#005EB8', '#3B82F6', '#10B981', '#F59E0B', '#8B5CF6'][i % 5]} 
-                        strokeWidth={2} 
-                        dot={false}
-                        connectNulls
-                    />
-                ))}
-            </LineChart>
-        </ResponsiveContainer>
-    ), [vintageData, isSales, valueFormatter]);
-
-    const ExpandButton = ({ target }: { target: string }) => (
-        <button 
-            onClick={() => setExpandedChart(target)}
-            className="absolute top-2 right-2 p-1.5 bg-white/80 hover:bg-white text-gray-400 hover:text-[#005EB8] rounded-md shadow-sm transition-all z-10"
-            title="全画面表示"
-        >
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path></svg>
-        </button>
+    const CohortLegend = () => (
+        <div className="flex flex-wrap gap-2 justify-end">
+            {COHORT_ORDER.map(c => (
+                <button
+                    key={c}
+                    onClick={() => setHiddenCohorts(prev => {
+                        const next = new Set(prev);
+                        if (next.has(c)) next.delete(c);
+                        else next.add(c);
+                        return next;
+                    })}
+                    className={`flex items-center gap-1.5 px-2 py-1 rounded-full border text-[9px] font-bold transition-all btn-press ${hiddenCohorts.has(c) ? 'bg-gray-50 text-gray-400 border-gray-200' : 'bg-white text-gray-700 border-gray-200 shadow-sm'}`}
+                >
+                    <span className={`w-2 h-2 rounded-full ${hiddenCohorts.has(c) ? 'bg-gray-300' : ''}`} style={{ backgroundColor: hiddenCohorts.has(c) ? undefined : COHORT_COLORS[c] }}></span>
+                    {c}
+                </button>
+            ))}
+        </div>
     );
 
     return (
         <div className="absolute inset-0 overflow-y-auto p-4 md:p-8 animate-fadeIn bg-[#F8FAFC]">
-            <div className="w-full px-4 md:px-8 space-y-6">
-                <div className="flex justify-between items-center">
-                    <h2 className="text-2xl font-black text-gray-800 uppercase tracking-tight font-display">全社経営ダッシュボード ({isSales ? '売上' : '客数'})</h2>
-                    <button 
-                        onClick={handleDownloadCSV}
-                        className="bg-white border border-gray-200 hover:bg-gray-50 text-[#005EB8] font-bold py-2 px-6 rounded-lg shadow-sm text-xs uppercase tracking-widest flex items-center gap-2 transition-all"
-                    >
-                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4-4m0 0l-4 4m4-4v12"></path></svg>
-                        CSV出力 (予測値)
-                    </button>
-                </div>
+            <div className="max-w-[1600px] mx-auto space-y-6 pb-32">
                 
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-6 font-bold font-display">
-                    <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6 border-l-8 border-[#005EB8]">
-                        <p className="text-[10px] text-gray-400 uppercase mb-1 flex items-center">
-                            稼働店舗合計予測値
-                            <HelpTooltip title="稼働店舗合計予測値" content="全稼働店舗の来月以降の予測値（ロジスティックモデルによるトレンド + 季節性 + 直近補正）を合算した数値です。新規出店計画分は含まれていません。" />
+                {/* Header & Tabs */}
+                <div className="flex flex-col md:flex-row justify-between items-end gap-6 animate-entry">
+                    <div>
+                        <div className="flex items-center gap-3 mb-1">
+                            <h2 className="text-3xl font-black text-gray-800 uppercase tracking-tighter font-display">Executive Dashboard</h2>
+                            <span className="bg-blue-100 text-[#005EB8] px-3 py-1 rounded-full text-xs font-black uppercase tracking-widest border border-blue-200">
+                                {viewMode === 'fiscal' ? 'Current Fiscal Year' : 'Long-term Strategy'}
+                            </span>
+                        </div>
+                        <p className="text-xs text-gray-400 font-bold">
+                            {viewMode === 'fiscal' 
+                                ? `今期決算進捗 (${kpis.fyLabel}): ${kpis.currentMonth || 'Start'}時点` 
+                                : '創業からの全期間推移と長期構造改革'}
                         </p>
-                        <h3 className="text-3xl font-black text-[#005EB8]">{Math.round(totalForecast / totalValueDivider).toLocaleString()}<span className="text-sm text-gray-400 ml-2">{totalUnitLabel}</span></h3>
                     </div>
-                    <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6 border-l-8 border-orange-500">
-                        <p className="text-[10px] text-gray-400 uppercase mb-1">分析対象店舗数 (稼働中)</p>
-                        <h3 className="text-3xl font-black text-gray-800">{activeStores.length}</h3>
-                    </div>
-                    <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6 border-l-8 border-purple-500">
-                        <p className="text-[10px] text-gray-400 uppercase mb-1">閉店・非稼働店舗</p>
-                        <h3 className="text-3xl font-black text-purple-600">{stores.length - activeStores.length}</h3>
-                    </div>
-                </div>
-
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                    <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-5 h-auto flex flex-col relative group">
-                        <ExpandButton target="forecast" />
-                        <div className="flex justify-between items-center mb-4">
-                            <h3 className="font-black text-gray-700 text-xs uppercase tracking-widest font-display flex items-center">
-                                全社推移予測 (稼働店積上)
-                                <HelpTooltip 
-                                    title="全社推移予測チャート" 
-                                    content={
-                                        <>
-                                            <p>過去の実績（黒線）と将来の予測（青い点線）を表示します。</p>
-                                            <p className="mt-2 font-bold text-slate-700">見るべきポイント:</p>
-                                            <ul className="list-disc pl-4 mt-1">
-                                                <li>青い点線が右肩上がりなら、既存店ベースで成長が続いています。</li>
-                                                <li>黒点（実績）が青線より下振れしている場合、全社的な不調のサインです。</li>
-                                            </ul>
-                                        </>
-                                    } 
-                                />
-                            </h3>
-                            <button onClick={() => setShowForecastTable(!showForecastTable)} className="text-xs text-[#005EB8] font-bold hover:underline">
-                                {showForecastTable ? "テーブルを隠す" : "詳細テーブルを表示"}
-                            </button>
-                        </div>
-                        <div className="h-[400px] w-full relative">
-                            {renderForecastChart()}
-                        </div>
-                        {showForecastTable && monthlyForecasts.length > 0 && (
-                            <div className="mt-4 pt-4 border-t border-gray-100 overflow-x-auto animate-fadeIn">
-                                <table className="min-w-full text-xs text-center">
-                                    <thead>
-                                        <tr>
-                                            <th className="px-2 py-1 font-black text-gray-500 bg-gray-50 border-r border-white whitespace-nowrap text-left">Metrics</th>
-                                            {monthlyForecasts.slice(0, 12).map(d => (
-                                                <th key={d.date} className="px-2 py-1 font-black text-gray-500 bg-gray-50 border-r border-white whitespace-nowrap">{d.date.split('-')[1]}月</th>
-                                            ))}
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                        <tr>
-                                            <td className="px-2 py-2 font-bold text-gray-600 border-r border-gray-100 text-left whitespace-nowrap">予測{isSales ? '売上' : '客数'}</td>
-                                            {monthlyForecasts.slice(0, 12).map(d => (
-                                                <td key={d.date} className="px-2 py-2 font-bold text-[#005EB8] border-r border-gray-100">{d.val.toLocaleString()}<span className="text-[9px] text-gray-400 ml-0.5">{isSales ? 'k' : '人'}</span></td>
-                                            ))}
-                                        </tr>
-                                        <tr>
-                                            <td className="px-2 py-2 font-bold text-gray-600 border-r border-gray-100 text-left whitespace-nowrap">前年比(YoY)</td>
-                                            {monthlyForecasts.slice(0, 12).map(d => (
-                                                <td key={d.date} className={`px-2 py-2 font-bold border-r border-gray-100 ${d.yoy >= 0 ? 'text-green-500' : 'text-red-500'}`}>
-                                                    {(d.yoy * 100).toFixed(1)}%
-                                                </td>
-                                            ))}
-                                        </tr>
-                                    </tbody>
-                                </table>
-                            </div>
-                        )}
-                    </div>
-                    <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-5 h-[500px] flex flex-col relative group">
-                        <ExpandButton target="portfolio" />
-                        <div className="flex justify-between items-start mb-4">
-                             <div>
-                                <h3 className="font-black text-gray-700 text-xs uppercase tracking-widest font-display flex items-center">
-                                    ポートフォリオ分析 (4象限マップ)
-                                    <HelpTooltip 
-                                        title="ポートフォリオ分析 (PPM)" 
-                                        content={
-                                            <>
-                                                <p>全店舗を「成長速度(k)」と「規模ポテンシャル(L)」で4つに分類します。</p>
-                                                <ul className="mt-2 space-y-1">
-                                                    <li><span className="text-orange-500 font-bold">Star (右上):</span> 高成長・大規模。最優先投資対象。</li>
-                                                    <li><span className="text-blue-500 font-bold">Cash Cow (左上):</span> 安定・大規模。利益の源泉。</li>
-                                                    <li><span className="text-purple-500 font-bold">Question (右下):</span> 高成長だが小規模。化ける可能性あり。</li>
-                                                    <li><span className="text-gray-500 font-bold">Dog (左下):</span> 低成長・小規模。撤退検討領域。</li>
-                                                </ul>
-                                            </>
-                                        } 
-                                    />
-                                </h3>
-                             </div>
-                        </div>
-                        <div className="flex-1 w-full relative">
-                            {renderPortfolioChart()}
-                            <div className="absolute top-10 right-10 text-[9px] font-black text-gray-300 pointer-events-none uppercase">高ポテンシャル / 高成長 (Star)</div>
-                            <div className="absolute bottom-12 right-10 text-[9px] font-black text-gray-300 pointer-events-none uppercase">低ポテンシャル / 急成長 (Question)</div>
-                            <div className="absolute top-10 left-16 text-[9px] font-black text-gray-300 pointer-events-none uppercase">高ポテンシャル / 成熟 (Cash Cow)</div>
-                        </div>
-                    </div>
-                </div>
-
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                    <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-5 h-[360px] flex flex-col relative group">
-                        <ExpandButton target="segmentedSales" />
-                        <h3 className="font-black text-gray-700 text-xs uppercase tracking-widest mb-4 font-display flex items-center">
-                            既存店(3年以上) vs 新店 {isSales ? '売上' : '客数'}推移比較
-                            <HelpTooltip 
-                                title={`セグメント別${isSales ? '売上' : '客数'}推移`} 
-                                content={`全社数値を「オープン3年以上の既存店（青）」と「3年未満の新店（オレンジ）」に分けて表示します。新店効果で全体の数字が良く見えているだけではないか？を確認するために使います。`} 
-                            />
-                        </h3>
-                        <div className="h-full pb-8">
-                            {renderSegmentedSalesChart()}
-                        </div>
-                    </div>
-                    <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-5 h-[360px] flex flex-col relative group">
-                        <ExpandButton target="segmentedGrowth" />
-                        <h3 className="font-black text-gray-700 text-xs uppercase tracking-widest mb-4 font-display flex items-center">
-                            属性別 成長率(YoY)推移
-                            <HelpTooltip 
-                                title="属性別成長率 (YoY)" 
-                                content="既存店と新店それぞれの昨対比成長率です。青線（既存店）が100%（0ライン）を割っている場合、構造的な顧客離れが起きている危険信号です。" 
-                            />
-                        </h3>
-                        <div className="h-full pb-8">
-                            {renderGrowthRateChart()}
-                        </div>
-                    </div>
-                </div>
-
-                <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-5 h-auto min-h-[500px] flex flex-col relative group">
-                    <ExpandButton target="stacked" />
-                    <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 gap-4">
-                        <h3 className="font-black text-gray-700 text-xs uppercase tracking-widest font-display whitespace-nowrap flex items-center">
-                            全社{isSales ? '売上' : '客数'} 積上構成 (創業ビンテージ別)
-                            <HelpTooltip 
-                                title="Vintage別積上グラフ" 
-                                content="オープン時期（年代）ごとに実績を色分けして積み上げたグラフです。「昔オープンした層（下の層）」が細くなっていないか（既存店の衰退）をチェックします。" 
-                            />
-                        </h3>
-                        <div className="flex flex-wrap gap-2 max-w-full justify-end pr-8">
-                            {allCohorts.map((cohort, i) => {
-                                const isDisabled = disabledCohorts.includes(cohort);
-                                const color = vintageColors[i % vintageColors.length];
-                                return (
-                                    <button
-                                        key={cohort}
-                                        onClick={() => toggleCohort(cohort)}
-                                        className={`px-3 py-1 rounded-full text-[10px] font-black uppercase transition-all flex items-center gap-2 ${isDisabled ? 'bg-gray-100 text-gray-400' : 'text-white shadow-sm'}`}
-                                        style={{ backgroundColor: isDisabled ? undefined : color }}
-                                    >
-                                        <span className={`w-2 h-2 rounded-full bg-white ${isDisabled ? 'opacity-0' : 'opacity-100'}`}></span>
-                                        {cohort}
-                                    </button>
-                                )
-                            })}
-                        </div>
-                    </div>
-                    <div className="h-[400px] w-full relative">
-                        {renderStackedAreaChart()}
-                    </div>
-                </div>
-
-                <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-5 h-auto flex flex-col font-bold relative group">
-                    <ExpandButton target="vintage" />
-                    <h3 className="font-black text-gray-700 text-xs uppercase tracking-widest mb-4 font-display flex items-center">
-                        Vintage分析 (5年開業組 / 正規化推移)
-                        <HelpTooltip 
-                            title="Vintage分析 (エイジング)" 
-                            content={
-                                <>
-                                    <p>オープン時期（世代）ごとに、経過月数ごとの平均実績を比較したものです。</p>
-                                    <p className="mt-2 font-bold text-slate-700">解釈:</p>
-                                    <p>新しい世代の線（明るい色）が古い世代（暗い色）より上にきていれば、出店戦略は成功しています（初速が良くなっている）。逆なら、立地選定の質が落ちている可能性があります。</p>
-                                </>
-                            } 
-                        />
-                    </h3>
-                    <div className="h-[350px] w-full relative">
-                        {renderVintageChart()}
-                    </div>
-                </div>
-            </div>
-
-            {/* Fullscreen Modal */}
-            {expandedChart && (
-                <div className="fixed inset-0 z-50 bg-white/95 backdrop-blur-sm flex flex-col p-4 md:p-8 animate-fadeIn">
-                    <div className="flex justify-between items-center mb-4 border-b pb-4">
-                        <h2 className="text-2xl font-black text-gray-800 uppercase tracking-tight font-display">
-                            {expandedChart === 'forecast' && '全社推移予測 詳細'}
-                            {expandedChart === 'portfolio' && 'ポートフォリオ分析 詳細'}
-                            {expandedChart === 'stacked' && `全社${isSales ? '売上' : '客数'} 積上構成 詳細`}
-                            {expandedChart === 'vintage' && 'Vintage分析 詳細'}
-                            {expandedChart === 'segmentedSales' && `既存店 vs 新店 ${isSales ? '売上' : '客数'}比較 詳細`}
-                            {expandedChart === 'segmentedGrowth' && '属性別 成長率(YoY)推移 詳細'}
-                        </h2>
+                    
+                    <div className="flex bg-white rounded-full p-1 shadow-sm border border-gray-200">
                         <button 
-                            onClick={() => setExpandedChart(null)}
-                            className="p-2 hover:bg-gray-100 rounded-full transition-colors"
+                            onClick={() => setViewMode('fiscal')}
+                            className={`px-6 py-2 rounded-full text-xs font-black transition-all flex items-center gap-2 btn-press ${viewMode === 'fiscal' ? 'bg-[#005EB8] text-white shadow-sm' : 'text-gray-400 hover:bg-gray-50'}`}
                         >
-                            <svg className="w-8 h-8 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2-2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 01-2 2h-2a2 2 0 01-2-2z"></path></svg>
+                            今期決算進捗
+                        </button>
+                        <button 
+                            onClick={() => setViewMode('strategic')}
+                            className={`px-6 py-2 rounded-full text-xs font-black transition-all flex items-center gap-2 btn-press ${viewMode === 'strategic' ? 'bg-[#005EB8] text-white shadow-sm' : 'text-gray-400 hover:bg-gray-50'}`}
+                        >
+                            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"></path></svg>
+                            長期成長戦略
                         </button>
                     </div>
-                    <div className="flex-1 w-full relative bg-white rounded-xl shadow-lg border border-gray-100 p-4">
-                        {expandedChart === 'forecast' && renderForecastChart()}
-                        {expandedChart === 'portfolio' && renderPortfolioChart()}
-                        {expandedChart === 'stacked' && renderStackedAreaChart()}
-                        {expandedChart === 'vintage' && renderVintageChart()}
-                        {expandedChart === 'segmentedSales' && renderSegmentedSalesChart()}
-                        {expandedChart === 'segmentedGrowth' && renderGrowthRateChart()}
-                    </div>
                 </div>
-            )}
+
+                {/* --- FISCAL VIEW --- */}
+                {viewMode === 'fiscal' && (
+                    <div className="space-y-6">
+                        {/* KPI Grid - Row 1: Budget & Forecast */}
+                        <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4">
+                            <KpiCard title="通期予算 (Budget)" value={Math.round(kpis.landingBudget/1000).toLocaleString()} unit="M" sub="今期必達目標" color="border-t-[#005EB8]" tooltip="今期（7月〜翌6月）の会社全体の売上目標総額です。" />
+                            <KpiCard title="YTD 予算達成率" value={kpis.ytdAchievement.toFixed(1)} unit="%" sub={`実績 ${Math.round(kpis.ytdActual/1000).toLocaleString()}M`} color={kpis.ytdAchievement >= 100 ? "border-t-green-500" : "border-t-red-500"} delay="delay-100" tooltip="期首から現時点までの予算に対する実績の進捗率です。100%超で順調です。" />
+                            <KpiCard title="着地見込 (Forecast)" value={Math.round(kpis.landingForecast/1000).toLocaleString()} unit="M" sub="現在のペースでの着地" color="border-t-blue-400" delay="delay-200" tooltip="現在のペースが続いた場合の、期末時点の予想売上です。" />
+                            <KpiCard title="予実乖離 (Gap)" value={(kpis.landingDiff/1000 > 0 ? '+' : '') + Math.round(kpis.landingDiff/1000).toLocaleString()} unit="M" sub="着地見込 - 予算" color={kpis.landingDiff >= 0 ? "border-t-green-500" : "border-t-red-500"} delay="delay-300" tooltip="着地見込と予算の差額です。プラスなら貯金、マイナスなら借金です。" />
+                            <KpiCard title="残予算 (Remaining)" value={Math.round(kpis.remainingBudget/1000).toLocaleString()} unit="M" sub="期末までに必要な売上" color="border-t-orange-400" delay="delay-100" tooltip="目標達成のために、残りの期間で売り上げる必要がある金額です。" />
+                            <KpiCard title="通期達成率見込" value={kpis.landingAchievement.toFixed(1)} unit="%" sub="このまま推移した場合" color={kpis.landingAchievement >= 100 ? "border-t-green-500" : "border-t-yellow-500"} delay="delay-200" tooltip="期末時点での最終的な達成率予測です。" />
+                        </div>
+
+                        {/* KPI Grid - Row 2: YoY Comparison */}
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 animate-entry delay-300">
+                            <KpiCard title="YTD 昨対比" value={`${kpis.ytdYoY >= 0 ? '+' : ''}${kpis.ytdYoY.toFixed(1)}`} unit="%" sub={`前年同期: ${Math.round(kpis.ytdLastYear/1000).toLocaleString()}M`} color={kpis.ytdYoY >= 0 ? "border-t-green-500" : "border-t-red-500"} tooltip="期首から現時点までの、昨年の実績に対する成長率です。" />
+                            <KpiCard title="期末着地 昨対比" value={`${kpis.landingYoY >= 0 ? '+' : ''}${kpis.landingYoY.toFixed(1)}`} unit="%" sub={`前年通期: ${Math.round(kpis.landingLastYear/1000).toLocaleString()}M`} color={kpis.landingYoY >= 0 ? "border-t-green-500" : "border-t-red-500"} tooltip="期末の見込み売上が、昨年の通期売上に対してどれくらい伸びるか。" />
+                            <div className="md:col-span-2 bg-gradient-to-r from-blue-50 to-white p-4 rounded-2xl border border-blue-100 flex items-center justify-between card-hover">
+                                <div>
+                                    <p className="text-[9px] font-black text-blue-400 uppercase flex items-center gap-1">昨対成長額 (YTD) <HelpTooltip title="昨対成長額" content="昨年同期と比較して、いくら売上が増えたか（減ったか）の絶対額。" /></p>
+                                    <p className={`text-2xl font-black ${kpis.ytdActual - kpis.ytdLastYear >= 0 ? 'text-[#005EB8]' : 'text-red-500'}`}>
+                                        {kpis.ytdActual - kpis.ytdLastYear > 0 ? '+' : ''}{Math.round((kpis.ytdActual - kpis.ytdLastYear)/1000).toLocaleString()} <span className="text-sm">M</span>
+                                    </p>
+                                </div>
+                                <div className="text-right">
+                                    <p className="text-[9px] font-black text-gray-400 uppercase flex items-center justify-end gap-1">通期成長見込額 <HelpTooltip title="通期成長見込" content="期末までに、昨年の総売上に対していくら上積みできるかの予測。" /></p>
+                                    <p className={`text-xl font-bold ${kpis.landingForecast - kpis.landingLastYear >= 0 ? 'text-gray-700' : 'text-gray-400'}`}>
+                                        {kpis.landingForecast - kpis.landingLastYear > 0 ? '+' : ''}{Math.round((kpis.landingForecast - kpis.landingLastYear)/1000).toLocaleString()} <span className="text-xs">M</span>
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Main Charts */}
+                        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 animate-entry delay-200">
+                            {/* Monthly Budget vs Actual + Last Year Line */}
+                            <div className="lg:col-span-2 bg-white p-5 rounded-3xl shadow-sm border border-gray-100 h-[400px] flex flex-col card-hover">
+                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display flex items-center gap-2">
+                                    <span className="w-2 h-2 rounded-full bg-[#005EB8]"></span>
+                                    月次予実 & 累積進捗 (with 昨対比較)
+                                    <HelpTooltip title="月次予実推移" content="月ごとの予算と実績を棒グラフで、累積の進捗を折れ線で比較します。点線は昨年の累積線です。" />
+                                </h3>
+                                <div className="flex-1 min-h-0">
+                                    <ResponsiveContainer width="100%" height="100%">
+                                        <ComposedChart data={fyChartData} margin={{ top: 20, right: 30, bottom: 20, left: 10 }}>
+                                            <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                                            <XAxis dataKey="month" tick={{fontSize: 9}} tickFormatter={(v)=>v.split('-')[1]+'月'} />
+                                            <YAxis yAxisId="left" tick={{fontSize: 9}} />
+                                            <YAxis yAxisId="right" orientation="right" tick={{fontSize: 9}} />
+                                            <Tooltip formatter={(val: number) => val.toLocaleString()} contentStyle={{borderRadius:'12px', border:'none', boxShadow:'0 10px 15px -3px rgba(0,0,0,0.1)'}} />
+                                            <Legend wrapperStyle={{ fontSize: '10px' }} />
+                                            
+                                            <Bar yAxisId="left" dataKey="budget" name="月次予算" fill="#CBD5E1" barSize={20} radius={[4,4,0,0]} />
+                                            <Bar yAxisId="left" dataKey="actual" name="月次実績" fill="#005EB8" barSize={20} radius={[4,4,0,0]} />
+                                            <Bar yAxisId="left" dataKey="forecast" name="AI予測" fill="#93C5FD" barSize={20} radius={[4,4,0,0]} />
+
+                                            <Line yAxisId="right" type="monotone" dataKey="cumBudget" name="累積予算" stroke="#64748B" strokeWidth={2} strokeDasharray="3 3" dot={false} />
+                                            <Line yAxisId="right" type="monotone" dataKey="cumActual" name="累積実績" stroke="#005EB8" strokeWidth={3} dot={{r:3}} />
+                                            {/* Last Year Cumulative Line */}
+                                            <Line yAxisId="right" type="monotone" dataKey="cumLastYear" name="前年累積" stroke="#94A3B8" strokeWidth={2} strokeDasharray="2 2" dot={false} />
+                                            
+                                            <ReferenceLine x={kpis.currentMonth} stroke="#F59E0B" strokeDasharray="3 3" label={{ value: 'NOW', position: 'top', fontSize: 9, fill: '#F59E0B' }} />
+                                        </ComposedChart>
+                                    </ResponsiveContainer>
+                                </div>
+                            </div>
+
+                            {/* Variance Analysis */}
+                            <div className="bg-white p-5 rounded-3xl shadow-sm border border-gray-100 h-[400px] flex flex-col card-hover">
+                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display flex items-center gap-1">
+                                    月次予実乖離 (Monthly Variance)
+                                    <HelpTooltip title="予実乖離" content="毎月の実績が予算に対してプラスだったかマイナスだったかを示します。" />
+                                </h3>
+                                <div className="flex-1 min-h-0">
+                                    <ResponsiveContainer width="100%" height="100%">
+                                        <BarChart data={fyChartData} layout="vertical" margin={{ top: 0, right: 30, bottom: 20, left: 0 }}>
+                                            <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#f1f5f9" />
+                                            <XAxis type="number" tick={{fontSize: 9}} />
+                                            <YAxis dataKey="month" type="category" tick={{fontSize: 9}} width={40} tickFormatter={(v)=>v.split('-')[1]} />
+                                            <Tooltip formatter={(val: number) => val.toLocaleString()} cursor={{fill: 'transparent'}} contentStyle={{borderRadius:'12px', border:'none', boxShadow:'0 10px 15px -3px rgba(0,0,0,0.1)'}} />
+                                            <ReferenceLine x={0} stroke="#000" />
+                                            <Bar dataKey="diff" radius={[0, 4, 4, 0]} barSize={15} name="予算差額">
+                                                {fyChartData.map((entry, index) => (
+                                                    <Cell key={`cell-${index}`} fill={entry.diff && entry.diff > 0 ? '#10B981' : '#EF4444'} />
+                                                ))}
+                                            </Bar>
+                                        </BarChart>
+                                    </ResponsiveContainer>
+                                </div>
+                                <div className="mt-4 pt-4 border-t border-gray-50 text-center">
+                                    <p className="text-[10px] text-gray-400 font-bold">累積乖離額</p>
+                                    <p className={`text-2xl font-black ${kpis.ytdDiff >= 0 ? 'text-green-500' : 'text-red-500'}`}>
+                                        {kpis.ytdDiff > 0 ? '+' : ''}{Math.round(kpis.ytdDiff).toLocaleString()}
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* New Chart: YoY Growth Trend */}
+                        <div className="bg-white p-5 rounded-3xl shadow-sm border border-gray-100 h-[300px] flex flex-col animate-entry delay-300 card-hover">
+                            <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display flex items-center gap-1">
+                                月次 昨対成長率トレンド (YoY Growth Rate %)
+                                <HelpTooltip title="昨対成長率" content="去年の同じ月と比べて何%成長したかを示します。100%未満は前年割れです。" />
+                            </h3>
+                            <div className="flex-1 min-h-0">
+                                <ResponsiveContainer width="100%" height="100%">
+                                    <BarChart data={fyChartData} margin={{ top: 10, right: 30, bottom: 20, left: 0 }}>
+                                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                                        <XAxis dataKey="month" tick={{fontSize: 9}} tickFormatter={(v)=>v.split('-')[1]+'月'} />
+                                        <YAxis tick={{fontSize: 9}} unit="%" />
+                                        <Tooltip formatter={(val: number) => val ? val.toFixed(1)+'%' : '-'} cursor={{fill: '#f8fafc'}} contentStyle={{borderRadius:'12px', border:'none'}} />
+                                        <ReferenceLine y={0} stroke="#000" />
+                                        <Bar dataKey="yoy" name="昨対成長率" barSize={30} radius={[4,4,0,0]}>
+                                            {fyChartData.map((entry, index) => (
+                                                <Cell key={`cell-${index}`} fill={(entry.yoy || 0) > 0 ? '#10B981' : '#EF4444'} />
+                                            ))}
+                                        </Bar>
+                                    </BarChart>
+                                </ResponsiveContainer>
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                {/* --- STRATEGIC VIEW --- */}
+                {viewMode === 'strategic' && (
+                    <div className="space-y-6 animate-entry">
+                        {/* Strategic KPIs */}
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                            {/* New Cumulative Card - Span 2 */}
+                            <div className="col-span-2 bg-gradient-to-r from-indigo-500 to-purple-600 p-4 rounded-2xl shadow-lg text-white flex flex-col justify-between h-full transform hover:scale-[1.02] transition-transform relative overflow-hidden">
+                                <div className="absolute top-0 right-0 p-4 opacity-10">
+                                    <svg className="w-24 h-24" fill="currentColor" viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5zm0 9l2.5-1.25L12 8.5l-2.5 1.25L12 11zm0 2.5l-5-2.5-5 2.5L12 22l10-8.5-5-2.5-5 2.5z"/></svg>
+                                </div>
+                                <div>
+                                    <p className="text-[10px] font-black uppercase tracking-widest opacity-80 mb-1 flex items-center gap-1">
+                                        創業以来 累計{isSales ? '売上高' : '客数'} (Grand Total)
+                                        <HelpTooltip title="創業累計" content="創業初日から現在までの全店舗の実績合計値です。" />
+                                    </p>
+                                    <div className="flex items-baseline gap-1">
+                                        <h3 className="text-3xl font-black font-display tracking-tight">
+                                            {isSales 
+                                                ? (aggregatedData.kpis.cumulativeActual / 100000).toLocaleString(undefined, {maximumFractionDigits: 0}) 
+                                                : (aggregatedData.kpis.cumulativeActual / 10000).toLocaleString(undefined, {maximumFractionDigits: 1})
+                                            }
+                                        </h3>
+                                        <span className="text-sm font-bold opacity-80">{isSales ? '億円' : '万人'}</span>
+                                    </div>
+                                </div>
+                                <div className="mt-2 pt-2 border-t border-white/20 text-[10px] font-bold opacity-80 flex justify-between">
+                                    <span>From Inception to Now</span>
+                                    <span>All Stores</span>
+                                </div>
+                            </div>
+
+                            <KpiCard title="全店舗数" value={kpis.totalStoreCount} unit="店" tooltip="現在登録されている全店舗数です（閉店含む）。" />
+                            <KpiCard title="稼働店舗数" value={kpis.activeStoreCount} unit="店" sub={`${(kpis.activeStoreCount/kpis.totalStoreCount*100).toFixed(1)}% Active`} tooltip="現在営業中の店舗数です。" />
+                            <KpiCard title="Aランク店舗数" value={kpis.abcA} unit="店" sub="主力稼働店" color="border-t-yellow-500" tooltip="売上貢献度が高い（上位70%を占める）優良店舗の数です。" />
+                            <KpiCard title="平均月齢" value={Math.round(kpis.avgAge)} unit="ヶ月" sub="店舗成熟度" color="border-t-purple-500" tooltip="全店舗の平均営業期間です。高いほど老舗が多く、低いほど新陳代謝が進んでいます。" />
+                            <KpiCard title="ジニ係数" value={kpis.gini.toFixed(2)} unit="" sub="店舗間格差 (0.4注意)" color={kpis.gini > 0.4 ? "border-t-red-500" : "border-t-green-500"} tooltip="店舗間の売上格差を示す指標です。0.4を超えると一部の店舗に依存しすぎている危険信号です。" />
+                        </div>
+
+                        {/* 1. Long-term Trend (Existing) */}
+                        <div className="bg-white rounded-3xl shadow-sm border border-gray-100 p-5 h-[400px] flex flex-col card-hover">
+                            <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display flex items-center gap-1">
+                                長期成長軌道 & 将来予測 (Historical & Forecast Trend)
+                                <HelpTooltip title="長期トレンド" content="創業からの長期的な売上推移と、AIによる将来予測です。過去の傾向から未来をシミュレーションします。" />
+                            </h3>
+                            <div className="flex-1 min-h-0">
+                                <ResponsiveContainer width="100%" height="100%">
+                                    <ComposedChart data={strategicData} margin={{ top: 20, right: 30, bottom: 20, left: 10 }}>
+                                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                                        <XAxis dataKey="date" tick={{fontSize: 9}} minTickGap={50} />
+                                        <YAxis tick={{fontSize: 9}} />
+                                        <Tooltip formatter={(val: number) => val.toLocaleString()} contentStyle={{borderRadius:'12px', border:'none', boxShadow:'0 10px 15px -3px rgba(0,0,0,0.1)'}} />
+                                        <Legend wrapperStyle={{ fontSize: '10px' }} />
+                                        
+                                        <Area type="monotone" dataKey="actual" name="実績" stroke="none" fill="#1A1A1A" fillOpacity={0.1} />
+                                        <Line type="monotone" dataKey="actual" name="実績推移" stroke="#1A1A1A" strokeWidth={2} dot={false} />
+                                        <Line type="monotone" dataKey="forecast" name="AI長期予測" stroke="#005EB8" strokeWidth={2} strokeDasharray="5 5" dot={false} />
+                                        <Line type="monotone" dataKey="budget" name="予算ライン" stroke="#10B981" strokeWidth={1} dot={false} />
+                                        
+                                        <ReferenceLine x={dateRangeInfo.lastDate.toISOString().slice(0,7)} stroke="#F59E0B" label={{ value: 'NOW', position: 'top', fontSize: 9, fill: '#F59E0B' }} />
+                                        <Brush dataKey="date" height={20} stroke="#cbd5e1" fill="#f8fafc" startIndex={Math.max(0, strategicData.length - 48)} />
+                                    </ComposedChart>
+                                </ResponsiveContainer>
+                            </div>
+                        </div>
+
+                        {/* 2. Mountain Chart (New) */}
+                        <div className="bg-white rounded-3xl shadow-sm border border-gray-100 p-5 h-[400px] flex flex-col animate-entry delay-100 card-hover">
+                            <div className="flex flex-col md:flex-row justify-between items-start mb-4 gap-4">
+                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest font-display flex items-center gap-2">
+                                    世代別 総量推移 (Cohort Mountain Chart)
+                                    <HelpTooltip title="マウンテンチャート" content="創業からの売上総量の推移を、オープン時期（世代）ごとに積み上げて表示します。どの世代が現在の収益を支えているか、新しい世代が順調に育っているかを確認できます。" />
+                                </h3>
+                                <CohortLegend />
+                            </div>
+                            <div className="flex-1 min-h-0">
+                                <ResponsiveContainer width="100%" height="100%">
+                                    <AreaChart data={strategicData} margin={{ top: 20, right: 30, bottom: 20, left: 10 }}>
+                                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                                        <XAxis dataKey="date" tick={{fontSize: 9}} minTickGap={30} />
+                                        <YAxis tick={{fontSize: 9}} />
+                                        <Tooltip formatter={(val: number) => val.toLocaleString()} contentStyle={{borderRadius:'12px', border:'none', boxShadow:'0 10px 15px -3px rgba(0,0,0,0.1)'}} />
+                                        
+                                        {COHORT_ORDER.map((c) => (
+                                            !hiddenCohorts.has(c) && (
+                                                <Area 
+                                                    key={c} 
+                                                    type="monotone" 
+                                                    dataKey={c} 
+                                                    stackId="1" 
+                                                    stroke={COHORT_COLORS[c]} 
+                                                    fill={COHORT_COLORS[c]} 
+                                                    fillOpacity={0.8} 
+                                                    name={c}
+                                                    animationDuration={500}
+                                                />
+                                            )
+                                        ))}
+                                        
+                                        <ReferenceLine x={dateRangeInfo.lastDate.toISOString().slice(0,7)} stroke="#EF4444" strokeWidth={2} label={{ value: 'NOW', position: 'top', fill: '#EF4444', fontSize: 10, fontWeight: 'black' }} />
+                                    </AreaChart>
+                                </ResponsiveContainer>
+                            </div>
+                        </div>
+
+                        {/* 3. Cumulative Growth (New) */}
+                        <div className="bg-white rounded-3xl shadow-sm border border-gray-100 p-5 h-[400px] flex flex-col card-hover animate-entry delay-150">
+                            <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display flex items-center gap-2">
+                                創業からの累積{isSales ? '売上' : '客数'}推移 (Cumulative Total)
+                                <HelpTooltip title="累積推移" content="創業初日からの実績（および将来予測）を積み上げた総量グラフです。企業の歴史的な総生産量を可視化します。" />
+                            </h3>
+                            <div className="flex-1 min-h-0">
+                                <ResponsiveContainer width="100%" height="100%">
+                                    <AreaChart data={strategicData} margin={{ top: 20, right: 30, bottom: 20, left: 10 }}>
+                                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                                        <XAxis dataKey="date" tick={{fontSize: 9}} minTickGap={50} />
+                                        <YAxis tick={{fontSize: 9}} tickFormatter={(val) => isSales ? (val/100000000).toFixed(0) + '億円' : (val/10000).toFixed(0) + '万人'} />
+                                        <Tooltip formatter={(val: number) => isSales ? Math.round(val).toLocaleString() + '円' : Math.round(val).toLocaleString() + '人'} contentStyle={{borderRadius:'12px', border:'none', boxShadow:'0 10px 15px -3px rgba(0,0,0,0.1)'}} />
+                                        <Legend wrapperStyle={{ fontSize: '10px' }} />
+                                        <Area type="monotone" dataKey="cumulative" stroke="#8B5CF6" fill="#8B5CF6" fillOpacity={0.1} strokeWidth={3} name={`累積${isSales ? '売上' : '客数'}`} />
+                                    </AreaChart>
+                                </ResponsiveContainer>
+                            </div>
+                        </div>
+
+                        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 animate-entry delay-200">
+                            {/* 3. Vintage Chart (Existing) */}
+                            <div className="bg-white rounded-3xl shadow-sm border border-gray-100 p-5 h-[400px] flex flex-col card-hover">
+                                <div className="flex justify-between items-center mb-4">
+                                    <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest font-display flex items-center gap-1">
+                                        Vintage Efficiency Curve (1店舗平均)
+                                        <HelpTooltip title="Vintage分析" content="オープン後1ヶ月目、2ヶ月目…という経過月数で揃えた成長カーブです。新しい世代の店舗が過去の店舗より強く育っているかを確認します。" />
+                                    </h3>
+                                    <CohortLegend />
+                                </div>
+                                <div className="flex-1 min-h-0">
+                                    <ResponsiveContainer width="100%" height="100%">
+                                        <LineChart data={vintageCurveData} margin={{ top: 20, right: 30, bottom: 20, left: 10 }}>
+                                            <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                                            <XAxis dataKey="period" type="number" tick={{fontSize: 9}} label={{ value: 'Months Since Open', position: 'bottom', offset: 0, fontSize: 9 }} />
+                                            <YAxis tick={{fontSize: 9}} />
+                                            <Tooltip formatter={(val: number) => val.toLocaleString()} />
+                                            {COHORT_ORDER.map(c => (
+                                                !hiddenCohorts.has(c) && (
+                                                    <Line key={c} type="monotone" dataKey={c} stroke={COHORT_COLORS[c]} strokeWidth={3} dot={false} connectNulls name={c} />
+                                                )
+                                            ))}
+                                        </LineChart>
+                                    </ResponsiveContainer>
+                                </div>
+                            </div>
+
+                            {/* 4. Portfolio Map (Existing) */}
+                            <div className="bg-white rounded-3xl shadow-sm border border-gray-100 p-5 h-[400px] flex flex-col card-hover">
+                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display flex items-center gap-1">
+                                    Store Portfolio (Growth vs Scale)
+                                    <HelpTooltip title="ポートフォリオ" content="各店舗を「成長率(k)」と「規模(L)」で配置した地図です。右上がエース店舗（Star）、左上が安定収益店舗（Cash Cow）です。" />
+                                </h3>
+                                <div className="flex-1 min-h-0">
+                                    <ResponsiveContainer width="100%" height="100%">
+                                        <ScatterChart margin={{ top: 20, right: 30, bottom: 20, left: 10 }}>
+                                            <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
+                                            <XAxis type="number" dataKey="x" name="Growth (k)" tick={{fontSize: 9}} label={{ value: 'Growth Speed (k)', position: 'bottom', offset: 0, fontSize: 9 }} />
+                                            <YAxis type="number" dataKey="y" name="Scale (L)" tick={{fontSize: 9}} label={{ value: 'Potential Scale (L)', angle: -90, position: 'left', offset: 0, fontSize: 9 }} />
+                                            <ZAxis type="number" dataKey="z" range={[50, 400]} />
+                                            <Tooltip cursor={{ strokeDasharray: '3 3' }} />
+                                            <Scatter name="Stores" data={bubbleData} fill="#005EB8" fillOpacity={0.6} />
+                                            <ReferenceLine x={0.1} stroke="#cbd5e1" strokeDasharray="3 3" />
+                                            <ReferenceLine y={3000} stroke="#cbd5e1" strokeDasharray="3 3" />
+                                        </ScatterChart>
+                                    </ResponsiveContainer>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+            </div>
         </div>
     );
 };

@@ -1,15 +1,17 @@
 
+export type UserMode = 'manager' | 'executive';
+
 export interface StoreData {
     name: string;
-    region?: string; // New: Kanto, Kansai, etc.
-    prefecture?: string; // New: Tokyo, Osaka, etc.
-    block?: string; // Company/Block grouping
+    region?: string; 
+    prefecture?: string; 
+    block?: string; 
     raw: number[];
     dates: string[];
     mask: boolean[];
     isActive: boolean;
     nudge: number;
-    nudgeDecay: number; // AR(1) autocorrelation coefficient
+    nudgeDecay: number; 
     seasonal: number[];
     components: { t: number[]; s: number[]; r: number[] };
     params: { L: number; k: number; t0: number; base: number; shift?: number; shift2?: number };
@@ -19,17 +21,19 @@ export interface StoreData {
     error?: boolean;
     msg?: string;
     
-    // New Advanced Stats
+    // Budget Data (YYYY-MM -> Value)
+    budget?: { [date: string]: number };
+
     stats?: {
-        totalSales: number;     // Total sales in data
-        lastYearSales: number;  // Sum of last 12 months
-        prevYearSales: number;  // Sum of 13-24 months ago
-        yoy: number;            // Year over Year growth
-        cagr: number;           // 3-year CAGR
-        abcRank: 'A' | 'B' | 'C'; // Pareto analysis
-        skewness: number;       // Distribution shape
-        cv: number;             // Coefficient of Variation (Stability)
-        zChart: { monthly: number; cumulative: number; mat: number }[]; // For Z-Chart
+        totalSales: number;     
+        lastYearSales: number;  
+        prevYearSales: number;  
+        yoy: number;            
+        cagr: number;           
+        abcRank: 'A' | 'B' | 'C'; 
+        skewness: number;       
+        cv: number;             
+        zChart: { monthly: number; cumulative: number; mat: number }[]; 
     };
 }
 
@@ -43,14 +47,14 @@ export interface ChartDataPoint {
 }
 
 export interface VintageDataPoint {
-    period: string; // "1ヶ月", "2ヶ月"...
-    [cohortKey: string]: number | string | null; // "2015s組": 1200
+    period: string; 
+    [cohortKey: string]: number | string | null; 
 }
 
 export interface BubblePoint {
-    x: number; // growth rate k
-    y: number; // potential L
-    z: number; // size
+    x: number; 
+    y: number; 
+    z: number; 
     name: string;
     cluster: number;
 }

@@ -1,151 +1,110 @@
 
-import React, { useState, useMemo, useCallback } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { StoreData } from '../types';
-import { analyzeStore, logisticModel } from '../services/analysisEngine';
 import HelpTooltip from './HelpTooltip';
 import {
-    LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend, ReferenceLine, Brush, ScatterChart, Scatter, ZAxis
+    LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend, ReferenceLine, ScatterChart, Scatter
 } from 'recharts';
 
-interface ModelValidationViewProps {
+interface BudgetValidationViewProps {
     allStores: { [name: string]: StoreData };
     dataType: 'sales' | 'customers';
 }
 
-interface BacktestResult {
+interface ValidationResult {
     name: string;
     mape: number; // Mean Absolute Percentage Error
-    bias: number; // Mean Error (Actual - Forecast)
+    bias: number; // Mean Error (Actual - Budget)
     rmse: number; // Root Mean Squared Error
-    trackingSignal: number; // Tracking Signal (Cumulative Error / MAD)
-    actuals: number[]; // Last 12 months actuals
-    forecasts: number[]; // Last 12 months forecasts (trained on N-12)
+    actuals: number[]; 
+    budgets: number[];
     dates: string[];
-    trainingK: number;
-    trainingL: number;
+    dataCount: number;
 }
 
-const ModelValidationView: React.FC<ModelValidationViewProps> = ({ allStores, dataType }) => {
+const BudgetValidationView: React.FC<BudgetValidationViewProps> = ({ allStores, dataType }) => {
     const [isProcessing, setIsProcessing] = useState(false);
-    const [progress, setProgress] = useState(0);
-    const [results, setResults] = useState<BacktestResult[]>([]);
-    const [selectedStore, setSelectedStore] = useState<BacktestResult | null>(null);
+    const [results, setResults] = useState<ValidationResult[]>([]);
+    const [selectedStore, setSelectedStore] = useState<ValidationResult | null>(null);
     const [searchTerm, setSearchTerm] = useState("");
 
     const isSales = dataType === 'sales';
 
-    // --- Backtest Execution Logic ---
-    const runBacktest = async () => {
+    // --- Validation Logic ---
+    const runValidation = async () => {
         setIsProcessing(true);
-        setProgress(0);
         setResults([]);
         setSelectedStore(null);
 
-        // Filter eligible stores (must have > 24 months of data to cut 12 and still have 12 for training)
-        const eligibleStores = (Object.values(allStores) as StoreData[]).filter(s => s.isActive && s.raw.length >= 24);
-        const batchSize = 10;
-        const tempResults: BacktestResult[] = [];
+        // Allow UI to update
+        await new Promise(r => setTimeout(r, 100));
 
-        for (let i = 0; i < eligibleStores.length; i += batchSize) {
-            const batch = eligibleStores.slice(i, i + batchSize);
+        const tempResults: ValidationResult[] = [];
+        const stores = (Object.values(allStores) as StoreData[]).filter(s => s.isActive);
+
+        stores.forEach(store => {
+            if (!store.budget) return;
+
+            const validDates: string[] = [];
+            const validActuals: number[] = [];
+            const validBudgets: number[] = [];
             
-            // Process batch
-            batch.forEach(store => {
-                try {
-                    // 1. Cut Data (Time Machine)
-                    const cutoff = 12;
-                    const trainRaw = store.raw.slice(0, -cutoff);
-                    const trainDates = store.dates.slice(0, -cutoff);
-                    const testRaw = store.raw.slice(-cutoff);
-                    const testDates = store.dates.slice(-cutoff);
-                    
-                    // Use the date of the last training point as the "current max date"
-                    const cutoffDate = new Date(trainDates[trainDates.length - 1].replace(/\//g, '-'));
+            let sumAbsPercError = 0;
+            let sumSqError = 0;
+            let sumError = 0;
+            let count = 0;
 
-                    // 2. Re-train Model
-                    // Note: We don't have historical GlobalStats easily available, 
-                    // so we run individual analysis without global priors (or use current ones as approx).
-                    // Using individual analysis is stricter test of the model itself.
-                    const result = analyzeStore(store.name, trainRaw, trainDates, cutoffDate);
+            // Iterate through actuals and find matching budgets
+            store.dates.forEach((date, idx) => {
+                const actual = store.raw[idx];
+                // Budget keys are usually YYYY-MM
+                const dateKey = date.replace(/\//g, '-');
+                const budget = store.budget ? store.budget[dateKey] : undefined;
 
-                    if (result.error) return;
+                // Only compare if we have both Actual > 0 and Budget > 0
+                if (actual > 0 && budget !== undefined && budget > 0) {
+                    validDates.push(dateKey);
+                    validActuals.push(actual);
+                    validBudgets.push(budget);
 
-                    // 3. Forecast Next 12 Months
-                    const forecasts: number[] = [];
-                    let sumAbsPercError = 0;
-                    let sumSqError = 0;
-                    let sumError = 0;
-                    let sumAbsError = 0; // For MAD
-                    const n = testDates.length;
-
-                    testDates.forEach((d, idx) => {
-                        // Prediction Index = trainRaw.length + idx
-                        const t = trainRaw.length + idx;
-                        const dObj = new Date(d.replace(/\//g, '-'));
-                        
-                        // Logistic Trend
-                        const tr = logisticModel(t, result.fit.params, result.fit.mode, result.fit.shockIdx);
-                        
-                        // Seasonality (from Training Phase)
-                        const sea = result.seasonal[dObj.getMonth()] || 1.0;
-                        
-                        // Nudge (Decayed from Training End)
-                        // Nudge is calculated at end of training set
-                        const decay = result.nudgeDecay || 0.7;
-                        const nudgeEffect = result.nudge * Math.pow(decay, idx + 1);
-                        
-                        const pred = Math.max(0, (tr * sea) + nudgeEffect);
-                        const actual = testRaw[idx];
-
-                        forecasts.push(pred);
-
-                        if (actual > 0) {
-                            const err = actual - pred;
-                            sumError += err;
-                            sumAbsError += Math.abs(err);
-                            sumSqError += err * err;
-                            sumAbsPercError += Math.abs(err / actual);
-                        }
-                    });
-
-                    // 4. Calculate Metrics
-                    const mape = (sumAbsPercError / n) * 100;
-                    const rmse = Math.sqrt(sumSqError / n);
-                    const bias = sumError / n;
-                    
-                    // Tracking Signal Calculation
-                    const mad = sumAbsError / n;
-                    const trackingSignal = mad !== 0 ? sumError / mad : 0;
-
-                    tempResults.push({
-                        name: store.name,
-                        mape,
-                        rmse,
-                        bias,
-                        trackingSignal,
-                        actuals: testRaw,
-                        forecasts,
-                        dates: testDates,
-                        trainingK: result.params.k,
-                        trainingL: result.params.L
-                    });
-
-                } catch (e) {
-                    console.warn(`Failed to backtest ${store.name}`, e);
+                    const err = actual - budget;
+                    sumError += err;
+                    sumSqError += err * err;
+                    sumAbsPercError += Math.abs(err / actual);
+                    count++;
                 }
             });
 
-            // Update Progress
-            setProgress(Math.round(((i + batch.length) / eligibleStores.length) * 100));
-            // Yield to UI
-            await new Promise(r => setTimeout(r, 0));
-        }
+            if (count >= 3) { // Require at least 3 months of overlap
+                const mape = (sumAbsPercError / count) * 100;
+                const rmse = Math.sqrt(sumSqError / count);
+                const bias = sumError / count;
+
+                tempResults.push({
+                    name: store.name,
+                    mape,
+                    rmse,
+                    bias,
+                    actuals: validActuals,
+                    budgets: validBudgets,
+                    dates: validDates,
+                    dataCount: count
+                });
+            }
+        });
 
         // Sort by MAPE (Accuracy)
         tempResults.sort((a, b) => a.mape - b.mape);
         setResults(tempResults);
         setIsProcessing(false);
     };
+
+    // Auto-run on mount if data exists
+    useEffect(() => {
+        if (Object.keys(allStores).length > 0 && results.length === 0 && !isProcessing) {
+            runValidation();
+        }
+    }, [allStores]);
 
     // --- View Helpers ---
     const filteredResults = useMemo(() => {
@@ -160,11 +119,11 @@ const ModelValidationView: React.FC<ModelValidationViewProps> = ({ allStores, da
         const sortedMape = [...results].sort((a,b) => a.mape - b.mape);
         const medianMape = sortedMape[Math.floor(results.length / 2)].mape;
         
-        // Count "Good" Forecasts (<7.5% error) - UPDATED THRESHOLD
-        const goodCount = results.filter(r => r.mape < 7.5).length;
+        // Count "Good" Budgets (<5% error) - Stricter Threshold
+        const goodCount = results.filter(r => r.mape < 5).length;
         const goodRate = (goodCount / results.length) * 100;
 
-        // Bias (Total Bias)
+        // Total Bias
         const totalBias = results.reduce((s, r) => s + r.bias, 0);
 
         return { avgMape, medianMape, goodRate, totalBias };
@@ -188,8 +147,8 @@ const ModelValidationView: React.FC<ModelValidationViewProps> = ({ allStores, da
         return selectedStore.dates.map((d, i) => ({
             date: d,
             actual: selectedStore.actuals[i],
-            forecast: Math.round(selectedStore.forecasts[i]),
-            diff: Math.round(selectedStore.actuals[i] - selectedStore.forecasts[i])
+            budget: Math.round(selectedStore.budgets[i]),
+            diff: Math.round(selectedStore.actuals[i] - selectedStore.budgets[i])
         }));
     }, [selectedStore]);
 
@@ -201,35 +160,35 @@ const ModelValidationView: React.FC<ModelValidationViewProps> = ({ allStores, da
                 <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-6 bg-white p-6 rounded-3xl shadow-sm border border-gray-100">
                     <div>
                         <h2 className="text-2xl font-black text-gray-800 uppercase tracking-tight font-display flex items-center gap-3">
-                            モデル精度検証 (Backtest Benchmark)
-                            <HelpTooltip title="バックテスト検証" content="過去のデータを意図的に隠し（直近12ヶ月分）、1年前の時点で予測モデルを作成した場合、その予測が実際の結果とどれくらい一致したかを検証します。" />
+                            予算精度検証 (Budget Accuracy)
+                            <HelpTooltip title="予算精度バックテスト" content="過去の実績と、ロードされた「予算データ」を照合し、予算設定の精度（MAPE）やバイアス（強気/弱気）を検証します。" />
                         </h2>
                         <p className="text-xs text-gray-500 font-bold mt-2">
-                            検証対象: 全{Object.keys(allStores).length}店舗 (直近12ヶ月の実績 vs 12ヶ月前のAI予測)
+                            検証対象: 予算と実績が重複する全期間 ({results.length}店舗)
                         </p>
                     </div>
                     <div className="w-full md:w-auto flex flex-col items-end">
                         <button 
-                            onClick={runBacktest}
+                            onClick={runValidation}
                             disabled={isProcessing}
                             className={`px-8 py-3 rounded-xl font-black uppercase text-xs tracking-widest shadow-lg transition-all transform active:scale-95 flex items-center gap-2 ${isProcessing ? 'bg-gray-300 text-gray-500 cursor-not-allowed' : 'bg-[#005EB8] text-white hover:bg-[#004a94]'}`}
                         >
                             {isProcessing ? (
-                                <><svg className="animate-spin h-4 w-4" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg> 検証実行中 ({progress}%)</>
+                                <><svg className="animate-spin h-4 w-4" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg> 再計算中...</>
                             ) : (
-                                <><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"></path><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg> バックテスト開始</>
+                                <><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg> データ更新</>
                             )}
                         </button>
                     </div>
                 </div>
 
-                {results.length > 0 && globalMetrics && (
+                {results.length > 0 && globalMetrics ? (
                     <div className="animate-fadeIn space-y-6">
                         {/* Global Metrics Cards */}
                         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                             <div className="bg-white p-5 rounded-2xl shadow-sm border border-gray-100 text-center">
                                 <p className="text-[10px] text-gray-400 font-black uppercase tracking-widest mb-1">平均誤差率 (Avg MAPE)</p>
-                                <p className={`text-3xl font-black font-display ${globalMetrics.avgMape < 7.5 ? 'text-green-500' : 'text-orange-500'}`}>
+                                <p className={`text-3xl font-black font-display ${globalMetrics.avgMape < 5 ? 'text-green-500' : 'text-orange-500'}`}>
                                     {globalMetrics.avgMape.toFixed(1)}<span className="text-sm">%</span>
                                 </p>
                             </div>
@@ -240,16 +199,17 @@ const ModelValidationView: React.FC<ModelValidationViewProps> = ({ allStores, da
                                 </p>
                             </div>
                             <div className="bg-white p-5 rounded-2xl shadow-sm border border-gray-100 text-center">
-                                <p className="text-[10px] text-gray-400 font-black uppercase tracking-widest mb-1">高精度店舗率 (Error &lt; 7.5%)</p>
+                                <p className="text-[10px] text-gray-400 font-black uppercase tracking-widest mb-1">高精度予算率 (&lt;5%)</p>
                                 <p className="text-3xl font-black font-display text-gray-800">
                                     {globalMetrics.goodRate.toFixed(1)}<span className="text-sm">%</span>
                                 </p>
                             </div>
                             <div className="bg-white p-5 rounded-2xl shadow-sm border border-gray-100 text-center">
-                                <p className="text-[10px] text-gray-400 font-black uppercase tracking-widest mb-1">総売上バイアス (Bias)</p>
+                                <p className="text-[10px] text-gray-400 font-black uppercase tracking-widest mb-1">予算バイアス (Bias)</p>
                                 <p className={`text-3xl font-black font-display ${globalMetrics.totalBias > 0 ? 'text-green-500' : 'text-red-500'}`}>
                                     {globalMetrics.totalBias > 0 ? '+' : ''}{Math.round(globalMetrics.totalBias).toLocaleString()}
                                 </p>
+                                <p className="text-[9px] text-gray-400 font-bold mt-1">{globalMetrics.totalBias > 0 ? '実績が上回る (弱気予算)' : '実績が下回る (強気予算)'}</p>
                             </div>
                         </div>
 
@@ -257,7 +217,7 @@ const ModelValidationView: React.FC<ModelValidationViewProps> = ({ allStores, da
                             {/* Distribution Histogram */}
                             <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 h-[300px]">
                                 <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest mb-4 font-display">
-                                    予測精度分布 (MAPE Histogram)
+                                    予算精度分布 (MAPE Histogram)
                                 </h3>
                                 <ResponsiveContainer width="100%" height="100%">
                                     <BarChart data={histData} margin={{ top: 0, right: 0, bottom: 20, left: 0 }}>
@@ -265,9 +225,8 @@ const ModelValidationView: React.FC<ModelValidationViewProps> = ({ allStores, da
                                         <XAxis dataKey="range" tick={{fontSize:9}} label={{ value: '誤差率 (MAPE)', position: 'bottom', offset: 0, fontSize: 9 }} />
                                         <YAxis tick={{fontSize:9}} allowDecimals={false} />
                                         <Tooltip cursor={{fill: '#f3f4f6'}} contentStyle={{borderRadius:'12px', border:'none', boxShadow:'0 10px 15px -3px rgba(0,0,0,0.1)'}} />
-                                        <Bar dataKey="count" fill="#005EB8" radius={[4, 4, 0, 0]} name="店舗数" />
-                                        {/* Reference Line for 7.5% threshold is between 5-10% bucket */}
-                                        <ReferenceLine x="5-10%" stroke="#10B981" strokeDasharray="3 3" label={{ value: 'Target (7.5%)', position: 'top', fontSize: 9, fill: '#10B981' }} />
+                                        <Bar dataKey="count" fill="#8B5CF6" radius={[4, 4, 0, 0]} name="店舗数" />
+                                        <ReferenceLine x="0-5%" stroke="#10B981" strokeDasharray="3 3" label={{ value: 'Ideal (<5%)', position: 'top', fontSize: 9, fill: '#10B981' }} />
                                     </BarChart>
                                 </ResponsiveContainer>
                             </div>
@@ -289,7 +248,7 @@ const ModelValidationView: React.FC<ModelValidationViewProps> = ({ allStores, da
                                                     <Tooltip formatter={(val: number) => val.toLocaleString()} contentStyle={{borderRadius:'12px', border:'none', boxShadow:'0 10px 15px -3px rgba(0,0,0,0.1)'}} />
                                                     <Legend wrapperStyle={{ fontSize: '9px' }} iconSize={8} />
                                                     <Line type="monotone" dataKey="actual" name="実績" stroke="#1A1A1A" strokeWidth={2} dot={true} />
-                                                    <Line type="monotone" dataKey="forecast" name="1年前の予測" stroke="#005EB8" strokeWidth={2} strokeDasharray="5 5" dot={false} />
+                                                    <Line type="step" dataKey="budget" name="設定予算" stroke="#8B5CF6" strokeWidth={2} strokeDasharray="3 3" dot={false} />
                                                 </LineChart>
                                             </ResponsiveContainer>
                                         </div>
@@ -306,7 +265,7 @@ const ModelValidationView: React.FC<ModelValidationViewProps> = ({ allStores, da
                         {/* Result Table */}
                         <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden flex flex-col h-[500px]">
                             <div className="p-4 border-b border-gray-100 flex justify-between items-center">
-                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest font-display">店舗別 検証結果リスト</h3>
+                                <h3 className="text-xs font-black text-gray-400 uppercase tracking-widest font-display">店舗別 予算精度リスト</h3>
                                 <input 
                                     type="text" 
                                     placeholder="店舗検索..." 
@@ -315,16 +274,14 @@ const ModelValidationView: React.FC<ModelValidationViewProps> = ({ allStores, da
                                     className="text-xs font-bold bg-gray-50 border-none rounded-lg p-2 w-48 outline-none focus:ring-1 focus:ring-[#005EB8]"
                                 />
                             </div>
-                            <div className="flex-1 overflow-auto">
+                            <div className="flex-1 overflow-auto custom-scrollbar">
                                 <table className="min-w-full text-left text-xs">
                                     <thead className="bg-gray-50 sticky top-0 z-10 shadow-sm">
                                         <tr>
                                             <th className="p-3 font-black text-gray-500 uppercase">店舗名</th>
                                             <th className="p-3 font-black text-gray-500 uppercase text-right">MAPE (誤差率)</th>
                                             <th className="p-3 font-black text-gray-500 uppercase text-right">Bias (平均乖離)</th>
-                                            <th className="p-3 font-black text-gray-500 uppercase text-right">TS (信号)</th>
-                                            <th className="p-3 font-black text-gray-500 uppercase text-right">学習時 k</th>
-                                            <th className="p-3 font-black text-gray-500 uppercase text-right">学習時 L</th>
+                                            <th className="p-3 font-black text-gray-500 uppercase text-right">比較データ数</th>
                                         </tr>
                                     </thead>
                                     <tbody className="divide-y divide-gray-50">
@@ -335,20 +292,14 @@ const ModelValidationView: React.FC<ModelValidationViewProps> = ({ allStores, da
                                                 className={`cursor-pointer transition-colors ${selectedStore?.name === r.name ? 'bg-blue-50' : 'hover:bg-gray-50'}`}
                                             >
                                                 <td className="p-3 font-bold text-gray-700">{r.name}</td>
-                                                <td className={`p-3 font-bold text-right ${r.mape < 7.5 ? 'text-green-600' : r.mape > 20 ? 'text-red-500' : 'text-orange-500'}`}>
+                                                <td className={`p-3 font-bold text-right ${r.mape < 5 ? 'text-green-600' : r.mape > 20 ? 'text-red-500' : 'text-orange-500'}`}>
                                                     {r.mape.toFixed(1)}%
                                                 </td>
                                                 <td className="p-3 font-mono text-right text-gray-500">
                                                     {Math.round(r.bias).toLocaleString()}
                                                 </td>
-                                                <td className={`p-3 font-mono text-right ${Math.abs(r.trackingSignal) > 4 ? 'text-red-500 font-black' : 'text-gray-500'}`}>
-                                                    {r.trackingSignal.toFixed(2)}
-                                                </td>
                                                 <td className="p-3 font-mono text-right text-gray-400">
-                                                    {r.trainingK.toFixed(3)}
-                                                </td>
-                                                <td className="p-3 font-mono text-right text-gray-400">
-                                                    {Math.round(r.trainingL).toLocaleString()}
+                                                    {r.dataCount}ヶ月
                                                 </td>
                                             </tr>
                                         ))}
@@ -357,10 +308,14 @@ const ModelValidationView: React.FC<ModelValidationViewProps> = ({ allStores, da
                             </div>
                         </div>
                     </div>
+                ) : (
+                    <div className="flex flex-col items-center justify-center h-64 text-gray-400 font-bold">
+                        <p>検証可能な予算データがありません。<br/>「データ読込」画面で予算CSVをロードしてください。</p>
+                    </div>
                 )}
             </div>
         </div>
     );
 };
 
-export default ModelValidationView;
+export default BudgetValidationView;

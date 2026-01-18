@@ -8,7 +8,7 @@ interface StoreTableViewProps {
     dataType: 'sales' | 'customers';
 }
 
-type SortField = 'region' | 'prefecture' | 'block' | 'name' | 'sales' | 'yoy' | 'abc' | 'k' | 'L' | 'age' | 'status';
+type SortField = 'region' | 'prefecture' | 'block' | 'name' | 'sales' | 'budget' | 'diff' | 'achievement' | 'yoy' | 'abc' | 'k' | 'L' | 'age' | 'status';
 type SortOrder = 'asc' | 'desc';
 type ViewMode = 'list' | 'matrix';
 
@@ -55,11 +55,21 @@ const StoreTableView: React.FC<StoreTableViewProps> = ({ allStores, dataType }) 
     // 1. Base Data Construction (Calculated Fields)
     const baseData = useMemo(() => {
         return Object.values(allStores).map((s: StoreData) => {
-            const latestSales = s.raw.length > 0 ? s.raw[s.raw.length - 1] : 0;
+            const lastIdx = s.raw.length - 1;
+            const latestSales = lastIdx >= 0 ? s.raw[lastIdx] : 0;
+            const latestDate = lastIdx >= 0 ? s.dates[lastIdx].replace(/\//g, '-') : '';
+            
+            const latestBudget = (s.budget && latestDate) ? (s.budget[latestDate] || 0) : 0;
+            const latestDiff = latestSales - latestBudget;
+            const latestAchievement = latestBudget > 0 ? (latestSales / latestBudget) * 100 : 0;
+
             const age = s.raw.length;
             return {
                 ...s,
                 latestSales,
+                latestBudget,
+                latestDiff,
+                latestAchievement,
                 age
             };
         });
@@ -106,6 +116,9 @@ const StoreTableView: React.FC<StoreTableViewProps> = ({ allStores, dataType }) 
                     case 'block': valA = a.block || ""; valB = b.block || ""; break;
                     case 'name': valA = a.name; valB = b.name; break;
                     case 'sales': valA = a.latestSales; valB = b.latestSales; break;
+                    case 'budget': valA = a.latestBudget; valB = b.latestBudget; break;
+                    case 'diff': valA = a.latestDiff; valB = b.latestDiff; break;
+                    case 'achievement': valA = a.latestAchievement; valB = b.latestAchievement; break;
                     case 'yoy': valA = a.stats?.yoy || -999; valB = b.stats?.yoy || -999; break;
                     case 'abc': valA = a.stats?.abcRank || 'Z'; valB = b.stats?.abcRank || 'Z'; break;
                     case 'k': valA = a.params.k; valB = b.params.k; break;
@@ -159,7 +172,7 @@ const StoreTableView: React.FC<StoreTableViewProps> = ({ allStores, dataType }) 
 
     const handleDownloadCSV = () => {
         if (viewMode === 'list') {
-            const headers = ["地方", "都道府県", "ブロック", "店舗名", "ステータス", "ABCランク", "稼働月数", isSales ? "直近月商(k)" : "直近客数(人)", "昨対比(YoY)", "成長率(k)", "潜在需要(L)", "モード", "変動率(CV)"];
+            const headers = ["地方", "都道府県", "ブロック", "店舗名", "ステータス", "ABCランク", "稼働月数", isSales ? "直近月商(k)" : "直近客数(人)", "予算", "差異", "達成率", "昨対比(YoY)", "成長率(k)", "潜在需要(L)", "モード", "変動率(CV)"];
             let csv = headers.join(",") + "\n";
             
             sortedFilteredData.forEach(s => {
@@ -172,6 +185,9 @@ const StoreTableView: React.FC<StoreTableViewProps> = ({ allStores, dataType }) 
                     s.stats?.abcRank || "-",
                     s.age,
                     s.latestSales,
+                    s.latestBudget,
+                    s.latestDiff,
+                    s.latestAchievement.toFixed(1) + "%",
                     (s.stats?.yoy ? (s.stats.yoy * 100).toFixed(1) : 0) + "%",
                     s.params.k.toFixed(4),
                     Math.round(s.params.L),
@@ -358,6 +374,9 @@ const StoreTableView: React.FC<StoreTableViewProps> = ({ allStores, dataType }) 
                                         <th onClick={() => handleSort('name')} className={thClass('name')}>店舗名</th>
                                         <th onClick={() => handleSort('abc')} className={thClass('abc')}>ABC</th>
                                         <th onClick={() => handleSort('sales')} className={`${thClass('sales')} text-right`}>{isSales ? '直近月商 (k)' : '直近客数 (人)'}</th>
+                                        <th onClick={() => handleSort('budget')} className={`${thClass('budget')} text-right text-gray-400`}>予算</th>
+                                        <th onClick={() => handleSort('diff')} className={`${thClass('diff')} text-right`}>差異</th>
+                                        <th onClick={() => handleSort('achievement')} className={`${thClass('achievement')} text-right`}>達成率</th>
                                         <th onClick={() => handleSort('yoy')} className={`${thClass('yoy')} text-right`}>昨対比 (YoY)</th>
                                         <th onClick={() => handleSort('k')} className={`${thClass('k')} text-right`}>成長率 (k)</th>
                                         <th onClick={() => handleSort('L')} className={`${thClass('L')} text-right`}>潜在需要 (L)</th>
@@ -386,6 +405,17 @@ const StoreTableView: React.FC<StoreTableViewProps> = ({ allStores, dataType }) 
                                                 </span>
                                             </td>
                                             <td className="px-4 py-3 text-xs font-bold text-right text-gray-700">{s.latestSales.toLocaleString()}</td>
+                                            <td className="px-4 py-3 text-xs font-bold text-right text-gray-400">{s.latestBudget > 0 ? s.latestBudget.toLocaleString() : '-'}</td>
+                                            <td className={`px-4 py-3 text-xs font-bold text-right ${s.latestDiff >= 0 ? 'text-green-600' : 'text-red-500'}`}>
+                                                {s.latestBudget > 0 ? (s.latestDiff > 0 ? '+' : '') + s.latestDiff.toLocaleString() : '-'}
+                                            </td>
+                                            <td className="px-4 py-3 text-xs font-bold text-right">
+                                                {s.latestBudget > 0 ? (
+                                                    <span className={`px-2 py-0.5 rounded ${s.latestAchievement >= 100 ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
+                                                        {s.latestAchievement.toFixed(1)}%
+                                                    </span>
+                                                ) : '-'}
+                                            </td>
                                             <td className="px-4 py-3 text-xs font-bold text-right">
                                                 <span className={!s.stats?.yoy ? 'text-gray-400' : s.stats.yoy > 0 ? 'text-green-600' : 'text-red-500'}>
                                                     {s.stats?.yoy ? (s.stats.yoy * 100).toFixed(1) : '-'}%

@@ -19,8 +19,9 @@ interface StoreAnalysisViewProps {
 const StoreAnalysisView: React.FC<StoreAnalysisViewProps> = ({ allStores, forecastMonths, dataType }) => {
     const [selectedStore, setSelectedStore] = useState<string | null>(null);
     const [searchTerm, setSearchTerm] = useState("");
+    const [filterBlock, setFilterBlock] = useState(""); // New Block Filter State
     const [showClosed, setShowClosed] = useState(false);
-    const [showGrowthOnly, setShowGrowthOnly] = useState(false); // New State
+    const [showGrowthOnly, setShowGrowthOnly] = useState(false); 
     
     const [activeTab, setActiveTab] = useState<string>('forecast');
     
@@ -39,20 +40,31 @@ const StoreAnalysisView: React.FC<StoreAnalysisViewProps> = ({ allStores, foreca
     const unitLabel = isSales ? '売上 (千円)' : '客数 (人)';
     const valueFormatter = (val: number) => val.toLocaleString() + (isSales ? '千円' : '人');
     
+    // Extract Unique Blocks
+    const uniqueBlocks = useMemo(() => {
+        const blocks = new Set<string>();
+        Object.values(allStores).forEach((s: StoreData) => {
+            if (s.block) blocks.add(s.block);
+        });
+        return Array.from(blocks).sort();
+    }, [allStores]);
+
     const filteredStores = useMemo(() => {
         return storeNames.filter(n => {
             const store = allStores[n];
             const matchesSearch = n.toLowerCase().includes(searchTerm.toLowerCase());
+            const matchesBlock = filterBlock ? store.block === filterBlock : true;
             const matchesStatus = showClosed ? true : store.isActive;
-            const matchesGrowth = showGrowthOnly ? store.raw.length < 36 : true; // New Filter Logic
-            return matchesSearch && matchesStatus && matchesGrowth;
+            const matchesGrowth = showGrowthOnly ? store.raw.length < 36 : true; 
+            return matchesSearch && matchesBlock && matchesStatus && matchesGrowth;
         });
-    }, [storeNames, searchTerm, showClosed, showGrowthOnly, allStores]);
+    }, [storeNames, searchTerm, filterBlock, showClosed, showGrowthOnly, allStores]);
 
     const currentStore = selectedStore ? allStores[selectedStore] : null;
 
     useEffect(() => {
-        if (!selectedStore && filteredStores.length > 0) {
+        // Only auto-select if current selection is invalid or null, AND we have filtered results
+        if ((!selectedStore || !filteredStores.includes(selectedStore)) && filteredStores.length > 0) {
             setSelectedStore(filteredStores[0]);
         }
     }, [filteredStores, selectedStore]);
@@ -92,9 +104,15 @@ const StoreAnalysisView: React.FC<StoreAnalysisViewProps> = ({ allStores, foreca
             fd.setMonth(lastDate.getMonth() + t);
             const label = `${fd.getFullYear()}-${String(fd.getMonth() + 1).padStart(2, '0')}`;
             
-            // Standard Forecast (Base)
+            // Standard Forecast (Base + Growth)
             const tr = logisticModel(idx, d.fit.params, d.fit.mode, d.fit.shockIdx);
-            const baseValRaw = (tr * (d.seasonal[fd.getMonth()] || 1.0)) + (d.nudge * Math.pow(decay, t));
+            
+            // Update: Nudge logic changed to be seasonal-aware
+            // Forecast = (Trend + Nudge * Decay) * Seasonality
+            const sea = d.seasonal[fd.getMonth()] || 1.0;
+            const nudgeComp = d.nudge * Math.pow(decay, t);
+            
+            const baseValRaw = (tr + nudgeComp) * sea;
             const unc = d.stdDev * (1 + t * 0.05);
             
             const baseVal = baseValRaw < 0 ? 0 : baseValRaw;
@@ -113,7 +131,7 @@ const StoreAnalysisView: React.FC<StoreAnalysisViewProps> = ({ allStores, foreca
                 simParams.k *= simK;
 
                 const trSim = logisticModel(idx, simParams, d.fit.mode, d.fit.shockIdx);
-                let targetVal = (trSim * (d.seasonal[fd.getMonth()] || 1.0)) + (d.nudge * Math.pow(decay, t));
+                let targetVal = (trSim + nudgeComp) * sea;
                 if (targetVal < 0) targetVal = 0;
 
                 const transitionMonths = 24;
@@ -241,7 +259,7 @@ const StoreAnalysisView: React.FC<StoreAnalysisViewProps> = ({ allStores, foreca
                 <YAxis tick={{fontSize:9}} label={{ value: unitLabel, angle: -90, position: 'left', offset: 0, fontSize: 9 }} />
                 <Tooltip formatter={valueFormatter} labelStyle={{color:'black'}} contentStyle={{borderRadius:'16px', border:'none', boxShadow:'0 10px 15px -3px rgba(0,0,0,0.1)'}} />
                 <Legend wrapperStyle={{ fontSize: '9px', paddingTop: '10px' }} iconSize={8} />
-                {!simMode && <Area type="monotone" dataKey="range" fill="#005EB8" fillOpacity={0.1} stroke="transparent" name="信頼区間" />}
+                {!simMode && <Area type="monotone" dataKey="range" fill="#005EB8" fillOpacity={0.1} stroke="transparent" name={`信頼区間 (${confidence}%)`} />}
                 <Line type="monotone" dataKey="forecast" stroke="#005EB8" strokeWidth={3} strokeDasharray={simMode ? "3 3" : "0"} dot={false} name="AI予測 (Base)" strokeOpacity={simMode ? 0.5 : 1} />
                 {simMode && <Line type="monotone" dataKey="simulated" stroke="#9333EA" strokeWidth={3} dot={false} name="Simulation (24mo Adjust)" animationDuration={300} />}
                 <Line type="monotone" dataKey="actual" stroke="#1A1A1A" strokeWidth={2} dot={{r:2, fill:'#1A1A1A'}} name="実績" />
@@ -249,7 +267,7 @@ const StoreAnalysisView: React.FC<StoreAnalysisViewProps> = ({ allStores, foreca
                 <Brush dataKey="date" height={20} stroke="#cbd5e1" fill="#f8fafc" />
             </ComposedChart>
         </ResponsiveContainer>
-    ), [chartData, simMode, unitLabel, valueFormatter]);
+    ), [chartData, simMode, unitLabel, valueFormatter, confidence]);
 
     const renderStlTrend = useCallback(() => (
         <ResponsiveContainer width="100%" height="100%">
@@ -311,11 +329,29 @@ const StoreAnalysisView: React.FC<StoreAnalysisViewProps> = ({ allStores, foreca
                     <input 
                         type="text" 
                         placeholder="店舗名検索..." 
-                        className="w-full p-4 bg-gray-50 border-none rounded-2xl text-xs outline-none focus:ring-2 focus:ring-[#005EB8] font-bold text-gray-600 placeholder-gray-400 transition-all"
+                        className="w-full p-4 bg-gray-50 border-none rounded-2xl text-xs outline-none focus:ring-2 focus:ring-[#005EB8] font-bold text-gray-600 placeholder-gray-400 transition-all mb-3"
                         value={searchTerm}
                         onChange={(e) => setSearchTerm(e.target.value)}
                     />
-                    <div className="mt-4 space-y-2">
+                    
+                    {/* Block Filter Dropdown */}
+                    <div className="relative mb-4">
+                        <select 
+                            value={filterBlock}
+                            onChange={(e) => setFilterBlock(e.target.value)}
+                            className="w-full p-3 bg-gray-50 border-none rounded-2xl text-xs outline-none focus:ring-2 focus:ring-[#005EB8] font-bold text-gray-600 appearance-none cursor-pointer"
+                        >
+                            <option value="">全てのブロック (All Blocks)</option>
+                            {uniqueBlocks.map(b => (
+                                <option key={b} value={b}>{b}</option>
+                            ))}
+                        </select>
+                        <div className="absolute right-4 top-1/2 -translate-y-1/2 pointer-events-none text-gray-400">
+                            <i className="fas fa-chevron-down text-xs"></i>
+                        </div>
+                    </div>
+
+                    <div className="space-y-2">
                         <label className="flex items-center gap-2 cursor-pointer select-none group">
                             <input 
                                 type="checkbox" 
@@ -345,7 +381,10 @@ const StoreAnalysisView: React.FC<StoreAnalysisViewProps> = ({ allStores, foreca
                             className={`w-full text-left padding-3 px-5 py-3 rounded-2xl text-xs font-bold transition-all transform hover:scale-[1.02] ${selectedStore === n ? 'bg-[#005EB8] text-white shadow-md shadow-blue-200' : 'text-gray-500 hover:bg-gray-50'}`}
                         >
                             <div className="flex justify-between items-center">
-                                <span>{n}</span>
+                                <div>
+                                    <span>{n}</span>
+                                    {allStores[n].block && <span className={`block text-[9px] mt-0.5 ${selectedStore === n ? 'text-blue-100' : 'text-gray-400'}`}>{allStores[n].block}</span>}
+                                </div>
                                 {!allStores[n].isActive && <span className="text-[9px] bg-white/20 text-white px-1.5 py-0.5 rounded uppercase backdrop-blur-sm">閉店</span>}
                             </div>
                         </button>
@@ -370,6 +409,7 @@ const StoreAnalysisView: React.FC<StoreAnalysisViewProps> = ({ allStores, foreca
                                      <span className={`px-2 py-0.5 rounded text-[10px] uppercase font-bold ${currentStore.isActive ? 'bg-green-100 text-green-600' : 'bg-gray-100 text-gray-500'}`}>{currentStore.isActive ? 'ACTIVE' : 'CLOSED'}</span>
                                      <span className="bg-blue-50 text-[#005EB8] px-2 py-0.5 rounded text-[10px] font-bold border border-blue-100">Rank: {currentStore.stats?.abcRank}</span>
                                      <span className="bg-orange-50 text-orange-600 px-2 py-0.5 rounded text-[10px] font-bold border border-orange-100">Mode: {currentStore.fit.mode}</span>
+                                     {currentStore.block && <span className="bg-gray-100 text-gray-600 px-2 py-0.5 rounded text-[10px] font-bold border border-gray-200">{currentStore.block}</span>}
                                  </div>
                              </div>
                              
@@ -391,6 +431,20 @@ const StoreAnalysisView: React.FC<StoreAnalysisViewProps> = ({ allStores, foreca
                                         <HelpTooltip title="AI予測グラフ" content="過去の実績（黒線）とAIによる将来予測（青線）を表示します。シミュレーションモードをONにすると、L（規模）やk（成長速度）を変更した場合のシナリオを描画できます。" />
                                     </h3>
                                     <div className="flex items-center gap-4 bg-gray-50 px-3 py-1.5 rounded-full border border-gray-200">
+                                        {/* Prediction Interval Selector */}
+                                        <div className="flex items-center gap-2 border-r border-gray-300 pr-4 mr-1">
+                                            <span className="text-[10px] font-bold text-gray-500">信頼区間:</span>
+                                            <select 
+                                                value={confidence} 
+                                                onChange={(e) => setConfidence(parseInt(e.target.value))}
+                                                className="bg-transparent text-xs font-black text-[#005EB8] outline-none cursor-pointer"
+                                            >
+                                                <option value={80}>80%</option>
+                                                <option value={95}>95%</option>
+                                                <option value={99}>99%</option>
+                                            </select>
+                                        </div>
+
                                         <label className="flex items-center gap-2 cursor-pointer select-none">
                                             <input type="checkbox" checked={simMode} onChange={(e) => setSimMode(e.target.checked)} className="accent-[#005EB8]" />
                                             <span className="text-xs font-bold text-gray-600">Simulation Mode</span>

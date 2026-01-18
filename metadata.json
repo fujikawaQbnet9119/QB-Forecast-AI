@@ -1,5 +1,7 @@
 {
   "name": "QB Forecast AI",
   "description": "An enterprise-grade store forecasting application using logistic growth models and AI analysis for QB HOUSE.",
-  "requestFramePermissions": []
+  "requestFramePermissions": [
+    "microphone"
+  ]
 }
