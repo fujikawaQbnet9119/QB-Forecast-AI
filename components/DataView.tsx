@@ -35,6 +35,19 @@ const DataView: React.FC<DataViewProps> = ({ setAllStores, setGlobalMaxDate, for
     const [previewLines, setPreviewLines] = useState<string[]>([]);
     const fileInputRef = useRef<HTMLInputElement>(null);
 
+    const handleSampleDataLoad = async () => {
+        try {
+            const response = await fetch('/sample_data.csv');
+            if (!response.ok) throw new Error('Failed to load sample data');
+            const blob = await response.blob();
+            const sampleFile = new File([blob], "sample_data.csv", { type: "text/csv" });
+            handleFileSelect(sampleFile);
+        } catch (error) {
+            console.error(error);
+            alert("サンプルデータの読み込みに失敗しました。");
+        }
+    };
+
     const handleFileSelect = (selectedFile: File) => {
         setFile(selectedFile);
         setFileName(selectedFile.name);
@@ -329,6 +342,19 @@ const DataView: React.FC<DataViewProps> = ({ setAllStores, setGlobalMaxDate, for
                                 '必須カラム(6列): 地方, 都道府県, Block, 店舗名, 年月, 実績'
                             )}
                         </p>
+
+                        {/* Sample Data Button */}
+                        {!file && (
+                             <div className="mt-6" onClick={(e) => e.stopPropagation()}>
+                                <button
+                                    onClick={handleSampleDataLoad}
+                                    className="text-sm font-bold text-[#005EB8] hover:text-[#004a94] hover:underline flex items-center justify-center gap-2 mx-auto transition-all"
+                                >
+                                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+                                    サンプルデータをロードして試す
+                                </button>
+                             </div>
+                        )}
                         
                         {/* Data Type Selector */}
                         <div className="mt-8 flex justify-center gap-4" onClick={(e) => e.stopPropagation()}>
