@@ -29,26 +29,19 @@ export default defineConfig(({ mode }) => {
     build: {
       // Production optimizations
       target: 'es2015',
-      minify: 'terser',
-      terserOptions: {
-        compress: {
-          drop_console: isProduction,
-          drop_debugger: isProduction,
-        },
-      },
-      // Code splitting
+      // Minify using default esbuild (no terser needed)
+      minify: 'esbuild',
+
+      // Code splitting configuration
       rollupOptions: {
         output: {
-          manualChunks: {
-            'react-vendor': ['react', 'react-dom'],
-            'chart-vendor': ['recharts'],
-            'ai-vendor': ['@google/genai', 'marked', 'katex'],
-            'utils': ['papaparse']
-          },
+          manualChunks: undefined // Let Vite handle chunking automatically
         },
       },
+
       // Chunk size warnings
       chunkSizeWarningLimit: 1000,
+
       // Source maps for debugging (disable in production for smaller builds)
       sourcemap: !isProduction,
     },
